@@ -49,6 +49,7 @@ export interface ReadOperations {
 	detectImageMimeType?: (absolutePath: string) => Promise<string | null | undefined>;
 }
 
+// 默认的读取操作
 const defaultReadOperations: ReadOperations = {
 	readFile: (path) => fsReadFile(path),
 	access: (path) => fsAccess(path, constants.R_OK),
@@ -235,9 +236,10 @@ export function createReadToolDefinition(
 
 					(async () => {
 						try {
+							// 1. 解析路径
 							const absolutePath = await resolveReadPathAsync(path, cwd);
 							if (aborted) return;
-							// Check if file exists and is readable.
+							// 2. 检查文件是否可读
 							await ops.access(absolutePath);
 							if (aborted) return;
 							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
@@ -262,7 +264,7 @@ export function createReadToolDefinition(
 									];
 								}
 							} else {
-								// Read text content.
+								// 读取文本内容
 								const buffer = await ops.readFile(absolutePath);
 								const textContent = buffer.toString("utf-8");
 								const allLines = textContent.split("\n");
