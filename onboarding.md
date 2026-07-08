@@ -75,7 +75,176 @@ orchestrator
 
 理解这个方向很重要：`ai` 不应该知道 CLI 或 TUI；`agent-core` 不应该知道 Pi 的具体终端界面；`coding-agent` 才是把所有能力组合成产品的地方。
 
-## 5. 一次用户请求的主链路
+## 5. 项目全景流程图
+
+下列图表从不同切面描述整个项目。建议配合第 6 节「一次用户请求的主链路」一起读。
+
+### 5.1 包层次与依赖
+
+```mermaid
+flowchart TB
+  subgraph product [产品层]
+    CA["coding-agent<br/>CLI / 会话 / 工具 / 扩展"]
+    ORCH["orchestrator<br/>实验性编排"]
+  end
+  subgraph app [应用运行时]
+    MAIN["main.ts 编排"]
+    SDK["sdk.ts createAgentSession"]
+    AS["AgentSession 外壳"]
+    SVC["agent-session-services"]
+    RT["AgentSessionRuntime"]
+  end
+  subgraph core [agent-core]
+    AG["Agent 状态机"]
+    LOOP["agent-loop 工具循环"]
+  end
+  subgraph foundation [基础设施]
+    AI["pi-ai<br/>provider / stream / auth"]
+    TUI["pi-tui<br/>终端渲染"]
+  end
+  ORCH --> CA
+  CA --> MAIN
+  MAIN --> RT
+  RT --> SVC
+  SVC --> SDK
+  SDK --> AS
+  AS --> AG
+  AG --> LOOP
+  LOOP --> AI
+  CA --> TUI
+  SDK --> AI
+```
+
+依赖方向：`orchestrator` → `coding-agent` → `agent-core` → `ai`；`tui` 被 `coding-agent` 消费，`ai` 不感知上层。
+
+### 5.2 CLI 启动流程
+
+```mermaid
+flowchart TD
+  START["用户执行 pi"] --> CLI["cli.ts<br/>HTTP dispatcher / main"]
+  CLI --> SUB{"子命令?"}
+  SUB -->|update / config| PKG["package-manager-cli<br/>直接退出"]
+  SUB -->|否| PARSE["parseArgs 解析参数"]
+  PARSE --> EARLY{"元命令?"}
+  EARLY -->|version / export / help| META["打印后退出"]
+  EARLY -->|否| MODE["resolveAppMode<br/>interactive / print / json / rpc"]
+  MODE --> BOOT["bootstrap SettingsManager<br/>HTTP 代理"]
+  BOOT --> FT{"首次设置?"}
+  FT -->|是| SETUP["showFirstTimeSetup"]
+  FT -->|否| SESS["createSessionManager<br/>--continue / --session / --fork 等"]
+  SETUP --> SESS
+  SESS --> CWD{"session cwd 缺失?"}
+  CWD -->|是| PROMPT_CWD["提示选择 cwd"]
+  CWD -->|否| FACTORY["createRuntime 工厂"]
+  PROMPT_CWD --> FACTORY
+  FACTORY --> RUNTIME["createAgentSessionRuntime<br/>首次执行工厂"]
+  RUNTIME --> DIAG["reportDiagnostics"]
+  DIAG --> BRANCH{"运行模式"}
+  BRANCH -->|interactive| IM["InteractiveMode.run<br/>TUI 主循环"]
+  BRANCH -->|print / json| PM["runPrintMode<br/>单次输出后退出"]
+  BRANCH -->|rpc| RPC["runRpcMode<br/>stdin JSON 协议常驻"]
+```
+
+### 5.3 Runtime 工厂与 services / session 分层
+
+```mermaid
+flowchart TD
+  FACTORY["createRuntime 工厂<br/>main.ts 定义，Runtime 持有"]
+  FACTORY --> SVC["createAgentSessionServices<br/>agent-session-services.ts"]
+  SVC --> RL["ResourceLoader.reload<br/>扩展 / skills / 主题 / templates"]
+  SVC --> TRUST["project trust 解析"]
+  SVC --> DIAG2["收集 diagnostics"]
+  RL --> OPT["buildSessionOptions<br/>model / tools / scopedModels"]
+  TRUST --> OPT
+  OPT --> FROM["createAgentSessionFromServices<br/>薄包装"]
+  FROM --> CAS["createAgentSession<br/>sdk.ts"]
+  CAS --> AGENT["创建 Agent<br/>streamFn / hooks"]
+  CAS --> SESSION["包装 AgentSession"]
+  SESSION --> OUT["返回 runtime<br/>session + services + diagnostics"]
+  OUT --> RELOAD{"换 session / cwd?"}
+  RELOAD -->|是| TEARDOWN["teardownCurrent 旧 session"]
+  TEARDOWN --> FACTORY
+  RELOAD -->|否| KEEP["继续运行"]
+```
+
+要点：services 绑 cwd，换项目 session 时重建；`createAgentSession` 只在 `sdk.ts` 定义，services 两层在 `agent-session-services.ts`，经再导出链可从 `sdk.ts` 导入。
+
+### 5.4 一次 Prompt 的完整链路
+
+```mermaid
+flowchart TD
+  INPUT["用户 prompt<br/>TUI / -p / RPC / 管道 stdin"]
+  INPUT --> PREP["prepareInitialMessage<br/>合并 @file / stdin"]
+  PREP --> PROMPT["AgentSession.prompt"]
+  PROMPT --> BIND["bindExtensions<br/>扩展 hook 就绪"]
+  BIND --> LOOP["runAgentLoop<br/>agent-core"]
+  LOOP --> OUTER{"follow-up 队列?"}
+  OUTER --> INNER["inner loop: 单轮 turn"]
+  INNER --> TCTX["transformContext<br/>扩展可改写上下文"]
+  TCTX --> CLLM["convertToLlm<br/>AgentMessage 转 LLM Message"]
+  CLLM --> PAYLOAD["before_provider_request hook"]
+  PAYLOAD --> STREAM["streamSimple<br/>pi-ai 按 provider 路由"]
+  STREAM --> EVENTS["AgentEvent 流<br/>message_update / tool_execution"]
+  EVENTS --> RENDER["TUI 渲染 / JSON 输出 / RPC 事件"]
+  STREAM --> TC{"模型输出 tool call?"}
+  TC -->|是| VALID["校验参数 TypeBox"]
+  VALID --> HOOK1["beforeToolCall hook"]
+  HOOK1 --> EXEC["执行工具<br/>read / bash / edit / write / 扩展工具"]
+  EXEC --> HOOK2["afterToolCall hook"]
+  HOOK2 --> TRESULT["生成 toolResult 消息"]
+  TRESULT --> PERSIST["SessionManager.append<br/>JSONL 持久化"]
+  PERSIST --> INNER
+  TC -->|否| TEND["turn_end"]
+  TEND --> OUTER
+  OUTER -->|队列空| END["agent_end"]
+  END --> COMPACT{"需要 compaction?"}
+  COMPACT -->|是| SUM["摘要旧消息"]
+  COMPACT -->|否| IDLE["等待下一条输入"]
+```
+
+### 5.5 资源加载与扩展介入点
+
+```mermaid
+flowchart LR
+  subgraph global [全局 ~/.pi/agent]
+    AUTH["auth.json"]
+    MODELS["models.json"]
+    TRUST_STORE["trust.json"]
+    GSETTINGS["全局 settings"]
+  end
+  subgraph project [项目 cwd]
+    PSETTINGS[".pi/settings.json"]
+    EXT_DIR["extensions/"]
+    SKILLS["skills/"]
+    THEMES["themes/"]
+  end
+  GSETTINGS --> SM["SettingsManager"]
+  PSETTINGS --> SM
+  TRUST_STORE --> PT["project trust"]
+  PT --> SM
+  SM --> RL["DefaultResourceLoader"]
+  EXT_DIR --> RL
+  SKILLS --> RL
+  THEMES --> RL
+  AUTH --> MR["ModelRegistry"]
+  MODELS --> MR
+  RL --> HOOKS["扩展 hooks<br/>before_agent_start / context / tool"]
+  MR --> STREAM["streamSimple 鉴权"]
+  RL --> CMD["slash commands / 自定义工具"]
+```
+
+### 5.6 四种运行模式对比
+
+| 模式 | 入口 | 生命周期 | stdout | stdin |
+|------|------|----------|--------|-------|
+| interactive | 直接 `pi` | 常驻 TUI | 终端 UI | 编辑器输入 |
+| print | `-p` | 单次退出 | 最终文本 | 可管道合并 |
+| json | `--mode json` | 单次退出 | JSON 事件流 | 可管道合并 |
+| rpc | `--mode rpc` | 常驻 | 响应 + 事件 | JSON 命令 |
+
+---
+
+## 6. 一次用户请求的主链路
 
 以用户在终端里输入一条 prompt 为例：
 
@@ -114,7 +283,7 @@ orchestrator
 8. `packages/tui/src`
    interactive mode 下，TUI 接收事件并把消息、工具执行、编辑器、footer 等渲染到终端。
 
-## 6. 核心概念
+## 7. 核心概念
 
 ### AgentMessage 与 LLM Message
 
@@ -157,7 +326,7 @@ Pi 的 session 是 JSONL 文件，并支持树形结构。每条 entry 有 `id` 
 
 这些资源由 `ResourceLoader` 加载，并受 project trust 控制。
 
-## 7. 新人阅读路线
+## 8. 新人阅读路线
 
 建议按下面顺序读，不要从 provider 或 UI 细节开始。
 
@@ -194,7 +363,7 @@ Pi 的 session 是 JSONL 文件，并支持树形结构。每条 entry 有 `id` 
 11. `packages/tui/README.md`
     需要改交互界面时再深入。
 
-## 8. 常见改动应该从哪里入手
+## 9. 常见改动应该从哪里入手
 
 | 需求 | 优先入口 |
 | --- | --- |
@@ -208,7 +377,7 @@ Pi 的 session 是 JSONL 文件，并支持树形结构。每条 entry 有 `id` 
 | 改扩展机制 | `packages/coding-agent/src/core/extensions` |
 | 改 compaction | `packages/coding-agent/src/core/compaction` |
 
-## 9. 新人实践任务
+## 10. 新人实践任务
 
 ### 任务 1：画出启动链路
 
@@ -260,7 +429,7 @@ Pi 的 session 是 JSONL 文件，并支持树形结构。每条 entry 有 `id` 
 - 能说明为什么不要直接改 generated model 文件。
 - 能说明 auth 和 env vars 应该在哪里接入。
 
-## 10. 考察题
+## 11. 考察题
 
 ### 基础题
 
@@ -303,7 +472,7 @@ Pi 的 session 是 JSONL 文件，并支持树形结构。每条 entry 有 `id` 
 4. 如果要让 interactive mode 显示新的状态栏字段，应该改哪些层？
 5. 如果用户恢复一个旧 session，但原模型不可用，应该如何降级？
 
-## 11. 参考答案要点
+## 12. 参考答案要点
 
 这些不是完整答案，只是判断方向是否正确。
 
@@ -313,7 +482,7 @@ Pi 的 session 是 JSONL 文件，并支持树形结构。每条 entry 有 `id` 
 - Extensibility：Pi 的理念是核心保持小，很多能力通过 extensions、skills、prompt templates、themes 扩展。
 - Provider：`ai` 包把 provider catalog、auth、API protocol、stream event 统一起来；`coding-agent` 只选择 model 并消费统一接口。
 
-## 12. 第一周学习目标
+## 13. 第一周学习目标
 
 完成第一周后，应该能做到：
 

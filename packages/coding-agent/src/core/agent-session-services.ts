@@ -17,11 +17,9 @@ import type { SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 
 /**
- * Non-fatal issues collected while creating services or sessions.
- *
- * Runtime creation returns diagnostics to the caller instead of printing or
- * exiting. The app layer decides whether warnings should be shown and whether
- * errors should abort startup.
+ * 在创建 services or sessions 期间收集的非致命问题
+ * runtime 创建过程中将诊断信息返回给调用方，而不是直接打印或退出。
+ * 应用层决定是否应显示警告，以及错误是否应中止启动过程。
  */
 export interface AgentSessionRuntimeDiagnostic {
 	type: "info" | "warning" | "error";
@@ -36,21 +34,34 @@ export interface AgentSessionRuntimeDiagnostic {
  * reach this function, so later cwd switches do not reinterpret them.
  */
 export interface CreateAgentSessionServicesOptions {
+	/** 当前工作目录。必填 */
 	cwd: string;
+	/** 全局配置目录。默认：~/.pi/agent */
 	agentDir?: string;
+	/** 凭据存储。默认：AuthStorage.create(agentDir/auth.json) */
 	authStorage?: AuthStorage;
+	/** 设置管理器。默认：SettingsManager.create(cwd, agentDir) */
 	settingsManager?: SettingsManager;
+	/** 模型注册表。默认：ModelRegistry.create(authStorage, agentDir/models.json) */
 	modelRegistry?: ModelRegistry;
+	/** 扩展标志值。默认：undefined */
 	extensionFlagValues?: Map<string, boolean | string>;
+	/** 资源加载器选项。默认：{ cwd, agentDir, settingsManager } */
 	resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager">;
+	/** 资源加载器重新加载选项。默认：{} */
 	resourceLoaderReloadOptions?: ResourceLoaderReloadOptions;
 }
 
 /**
- * Inputs for creating an AgentSession from already-created services.
+ * 入参类型：用已经建好的 AgentSessionServices 来创建 AgentSession。
+ * 不是从零开始，services 必须先存在。
  *
- * Use this after services exist and any cwd-bound model/tool/session options
- * have been resolved against those services.
+ * 调用时机：createAgentSessionServices() 跑完之后再用，不能跳过 services 直接调这个。
+ * 传进来之前，所有绑 cwd 的选项要对着 services 算好：模型、工具、thinking 等。
+ * 这些在 CLI 里就是 buildSessionOptions() 干的事。
+ * 
+ * 厨房（services）装好了、菜也点好了（model/tools 定下来了）
+ * 这个类型就是「下单开火」的传参——把厨房 + 菜单交给 createAgentSession() 真正做出 AgentSession。
  */
 export interface CreateAgentSessionFromServicesOptions {
 	services: AgentSessionServices;
@@ -66,10 +77,13 @@ export interface CreateAgentSessionFromServicesOptions {
 }
 
 /**
- * Coherent cwd-bound runtime services for one effective session cwd.
- *
- * This is infrastructure only. The AgentSession itself is created separately so
- * session options can be resolved against these services first.
+ * AgentSessionServices 是一套完整、绑在某个 cwd 上的 runtime service。
+ * cwd 定了，里面的 settings、扩展、模型注册表、资源加载器都按这个项目目录配好，彼此一致。
+ * 它只是基础设施，不是能对话的 session。没有 prompt()，不管消息流，只管环境备好。
+ * AgentSession 另一步再建。
+ * 原因：选 model、tools、thinking 时要先查 modelRegistry、settingsManager——这些都在 services 里。
+ * 顺序必须是：先 services → 对着 services 解析选项 → 再 createAgentSession。
+ * 这是「厨房设备清单」，不是「正在做的菜」。先装好厨房，再决定做什么菜、用什么锅（model/tools），最后才开火（AgentSession）。
  */
 export interface AgentSessionServices {
 	cwd: string;

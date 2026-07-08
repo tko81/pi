@@ -1,27 +1,22 @@
 /**
- * Built-in Tool Renderer Example - Custom rendering for built-in tools
+ * 内置工具渲染示例——为内置工具自定义展示
  *
- * Demonstrates how to override the rendering of built-in tools (read, bash,
- * edit, write) without changing their behavior. Each tool is re-registered
- * with the same name, delegating execution to the original implementation
- * while providing compact custom renderCall/renderResult functions.
+ * 演示如何在不改变行为的前提下覆盖内置工具（read、bash、edit、write）的渲染。
+ * 每个工具以相同名称重新注册：执行委托给原实现，同时提供紧凑的自定义
+ * renderCall/renderResult。
  *
- * This is useful for users who prefer more concise tool output, or who want
- * to highlight specific information (e.g., showing only the diff stats for
- * edit, or just the exit code for bash).
+ * 适用于希望工具输出更简洁、或只突出特定信息的用户（例如 edit 仅显示 diff 统计，
+ * bash 仅显示退出码）。
  *
- * How it works:
- * - registerTool() with the same name as a built-in replaces it entirely
- * - We create instances of the original tools via createReadTool(), etc.
- *   and delegate execute() to them
- * - renderCall() controls what's shown when the tool is invoked
- * - renderResult() controls what's shown after execution completes
- * - renderShell: "self" lets a tool render its own outer shell instead of
- *   using the default boxed shell from ToolExecutionComponent
- * - The `expanded` flag in renderResult indicates whether the user has
- *   toggled the tool output open (via ctrl+e or clicking)
+ * 工作原理：
+ * - 用与内置工具相同的名称调用 registerTool() 会完全替换该工具
+ * - 通过 createReadTool() 等创建原工具实例，并将 execute() 委托给它们
+ * - renderCall() 控制工具被调用时的展示
+ * - renderResult() 控制执行完成后的展示
+ * - renderShell: "self" 让工具自行渲染外层 shell，而非使用 ToolExecutionComponent 的默认框线 shell
+ * - renderResult 中的 `expanded` 表示用户是否已展开工具输出（ctrl+e 或点击）
  *
- * Usage:
+ * 用法：
  *   pi -e ./built-in-tool-renderer.ts
  */
 

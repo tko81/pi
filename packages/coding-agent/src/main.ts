@@ -466,20 +466,28 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
+	// 重置计时器
 	resetTimings();
+
+	// 检查是否为离线模式
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";
 		process.env.PI_SKIP_VERSION_CHECK = "1";
 	}
 
+	// 清理 Windows 自我更新隔离
 	if (process.platform === "win32") {
 		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
 	}
 
+	// 获取当前工作目录
 	const cwd = process.cwd();
+	// 获取代理目录
 	const agentDir = getAgentDir();
+	// 创建引导设置管理器
 	const bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
+	// 应用 HTTP 代理设置
 	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher();
 
@@ -673,7 +681,7 @@ export async function main(args: string[], options?: MainOptions) {
 		});
 		const { settingsManager, modelRegistry, resourceLoader } = services;
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
-			...projectTrustDiagnostics,
+			...projectTrustDiagnostics, // 数组中的每个元素展开
 			...services.diagnostics,
 			...collectSettingsDiagnostics(settingsManager, "runtime creation"),
 			...resourceLoader.getExtensions().errors.map(({ path, error }) => ({

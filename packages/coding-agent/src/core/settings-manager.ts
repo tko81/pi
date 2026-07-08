@@ -7,42 +7,123 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 
+/**
+ * 两层配置：~/.pi/agent/settings.json（全局）+ <cwd>/.pi/settings.json（项目）
+ * 信任控制：projectTrusted 决定是否加载/写项目设置
+ * 合并策略：项目覆盖全局；嵌套对象递归 merge
+ * 安全写盘：文件锁 + 写队列；只 persist 改过的字段（modifiedFields / modifiedNestedFields）
+ * 版本迁移：migrateSettings 把旧字段名（如 queueMode）转成新格式
+ * 错误收集：解析失败记入 errors，drainErrors() 给上层报 diagnostic
+ */
+
+/**
+ * 会话压缩配置：对话太长、快顶满模型上下文时，pi 会把旧消息摘要成一段 summary，腾出 token
+ */
 export interface CompactionSettings {
-	enabled?: boolean; // default: true
-	reserveTokens?: number; // default: 16384
-	keepRecentTokens?: number; // default: 20000
+	// 是否开启自动压缩，默认为 true，false 则不会自动做（仍可手动 /compact）
+	enabled?: boolean;
+
+	// 预留给本轮对话的 token 空间（用户输入 + 模型回复）
+	// 触发条件：当前上下文 token 数 > contextWindow - reserveTokens
+	// 默认留 16384，避免把上下文塞满导致模型没地方输出
+	reserveTokens?: number; 
+
+	// 压缩时保留多少最近消息的 token 不被压缩，默认 20000，既控总长，又保证近期对话细节还在
+	keepRecentTokens?: number;
 }
 
+/**
+ * 用 /tree 从当前分支跳到另一条线时，刚离开的那条分支可以先摘要再切，避免丢掉重要上下文
+ * 树怎么工作
+ * 
+ * ├─ user: "重构 auth"
+ * │  └─ assistant: "方案 A..."
+ * │     ├─ user: "试 A"          ← 分支 1（你刚离开）
+ * │     │  └─ assistant: "..."
+ * │     └─ user: "改试 B"        ← 分支 2（当前 active）
+ * │        └─ assistant: "..."
+ * 
+ * 整棵树都在一个 .jsonl 里（所有分支都存着）
+ * 活跃上下文 = 从 root 沿 parentId 走到当前 leaf 的消息链
+ * 模型只看这条链，别的分支消息不进 prompt
+ * 
+ * /tree 切分支 = 把 leaf 挪到树上另一个点，活跃路径换掉，之前那条线的原文不再发给模型。
+ * 
+ * 为什么要摘要
+ * 切走时，刚离开的分支可能很长（多轮 tool call、关键结论）。
+ * leaf 一挪，那些消息还在文件里，但不再出现在上下文里——模型等于「忘了」你刚在那条线里干了什么。
+ * 分支摘要的作用：把即将离开的那条分支压成一段 summary，挂到新位置。
+ * 新路径上模型仍能看到「之前另一条线大概做了什么」，又不用把整段历史塞回 context。
+ * 文档原话：preserve context from the path you left without replaying the whole branch。
+ * 
+ * 弹窗问「Summarize branch?」可以选不摘要——接受切换后丢失那条线的细节。branchSummary.skipPrompt: true 则默认不摘要、直接切。
+ * 
+ * 一句话：分支共用一个 session 文件，但不同时进模型上下文；切分支会换掉活跃路径，摘要用来把旧路径的精华带到新路径上。
+ */
 export interface BranchSummarySettings {
-	reserveTokens?: number; // default: 16384 (tokens reserved for prompt + LLM response)
-	skipPrompt?: boolean; // default: false - when true, skips "Summarize branch?" prompt and defaults to no summary
+	// 预留给分支摘要的 token 空间（用户输入 + 模型回复）,与上面类似，默认 16384
+	reserveTokens?: number; 
+
+	// 切分支时，弹窗是否跳过 "Summarize branch?" 提示，默认 false，true 则不提示，直接摘要
+	skipPrompt?: boolean; 
 }
 
+/**
+ * 提供者重试设置
+ * 调模型 API 时 SDK 层：
+ * timeoutMs: 单次 HTTP 请求超时（毫秒）
+ * maxRetries: provider SDK 自动重试次数
+ * maxRetryDelayMs: 服务端要求等待的上限，默认 60000ms，超了失败
+ */
 export interface ProviderRetrySettings {
-	timeoutMs?: number; // SDK/provider request timeout in milliseconds
-	maxRetries?: number; // SDK/provider retry attempts
-	maxRetryDelayMs?: number; // default: 60000 (max server-requested delay before failing)
+	timeoutMs?: number;
+	maxRetries?: number;
+	maxRetryDelayMs?: number;
 }
 
+/**
+ * agent 层，整轮对话失败后自动重跑：
+ * enabled: 是否开启，默认 true
+ * maxRetries: 最多重试几轮，默认 3
+ * baseDelayMs: 指数退避基数，默认 2000ms（2s、4s、8s…）
+ * provider: 嵌套上面的 provider 重试配置
+ */
 export interface RetrySettings {
-	enabled?: boolean; // default: true
-	maxRetries?: number; // default: 3
-	baseDelayMs?: number; // default: 2000 (exponential backoff: 2s, 4s, 8s)
+	enabled?: boolean;
+	maxRetries?: number;
+	baseDelayMs?: number;
 	provider?: ProviderRetrySettings;
 }
 
+/**
+ * howImages
+ * showImages: 终端里是否显示图片，默认 true（终端得支持）
+ * imageWidthCells: 内联图宽度（字符格），默认 60
+ * clearOnShrink: 内容变短时是否清掉空行，默认 false
+ * showTerminalProgress: 是否发 OSC 9;4 进度条给终端，默认 false
+ */
 export interface TerminalSettings {
-	showImages?: boolean; // default: true (only relevant if terminal supports images)
-	imageWidthCells?: number; // default: 60 (preferred inline image width in terminal cells)
-	clearOnShrink?: boolean; // default: false (clear empty rows when content shrinks)
-	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
+	showImages?: boolean;
+	imageWidthCells?: number;
+	clearOnShrink?: boolean;
+	showTerminalProgress?: boolean;
 }
 
+/**
+ * 发给模型的图片
+ * autoResize: 发模型前是否缩到最大 2000×2000，默认 true
+ * blockImages: 为 true 时所有图片都不发给 LLM，换成占位文本，默认 false
+ */
 export interface ImageSettings {
-	autoResize?: boolean; // default: true (resize images to 2000x2000 max for better model compatibility)
-	blockImages?: boolean; // default: false - when true, prevents all images from being sent to LLM providers
+	autoResize?: boolean;
+	blockImages?: boolean;
 }
 
+/**
+ * 思考 token 预算
+ * 给支持 thinking 的模型，按级别设自定义 token 上限：
+ * minimal / low / medium / high — 对应各 thinking level 的预算。不设则用模型/provider 默认。
+ */
 export interface ThinkingBudgetsSettings {
 	minimal?: number;
 	low?: number;
@@ -50,22 +131,46 @@ export interface ThinkingBudgetsSettings {
 	high?: number;
 }
 
+/**
+ * Markdown 渲染设置
+ * 代码块缩进，默认两个空格 " "
+ */
 export interface MarkdownSettings {
-	codeBlockIndent?: string; // default: "  "
+	codeBlockIndent?: string;
 }
 
+/**
+ * 警告设置
+ */
 export interface WarningSettings {
-	anthropicExtraUsage?: boolean; // default: true
+	anthropicExtraUsage?: boolean; // 是否显示 Anthropic 额外用量相关警告，默认 true
+
 }
 
+/**
+ * 默认项目信任设置
+ * 全局-only，未单独存过信任决定时用：
+ * ask: 默认，非交互模式不加载项目扩展等，交互会问
+ * always: 默认信任项目资源
+ * never: 默认不信任
+ * 也可用 CLI --approve / --no-approve 单次覆盖。
+ */
 export type DefaultProjectTrust = "ask" | "always" | "never";
 
+/**
+ * 传输设置
+ * 来自 pi-ai："sse" | "websocket" | "websocket-cached" | "auto"。
+ * 控制和部分 provider 通信用 SSE 还是 WebSocket；auto 自动选。
+ */
 export type TransportSetting = Transport;
 
 /**
- * Package source for npm/git packages.
- * - String form: load all resources from the package
- * - Object form: filter which resources to load
+ * 扩展包来源
+ * 从 npm/git 装 pi 资源包时的格式：
+ * 字符串："@scope/pkg" — 加载包内全部资源
+ * 对象：指定 source，并可只加载部分：
+ * extensions / skills / prompts / themes — 白名单路径
+ * 配合 settings.packages 数组，由 pi 包管理 / ResourceLoader 发现扩展、skills 等。
  */
 export type PackageSource =
 	| string
@@ -267,20 +372,22 @@ export class InMemorySettingsStorage implements SettingsStorage {
 	}
 }
 
+// pi 的配置中心，读、合并、改、写用户设置
 export class SettingsManager {
-	private storage: SettingsStorage;
-	private globalSettings: Settings;
-	private projectSettings: Settings;
-	private settings: Settings;
-	private projectTrusted: boolean;
-	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
-	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
-	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
-	private modifiedProjectNestedFields = new Map<keyof Settings, Set<string>>(); // Track project nested field modifications
-	private globalSettingsLoadError: Error | null = null; // Track if global settings file had parse errors
-	private projectSettingsLoadError: Error | null = null; // Track if project settings file had parse errors
-	private writeQueue: Promise<void> = Promise.resolve();
-	private errors: SettingsError[];
+	private storage: SettingsStorage; // 存储后端，文件或内存
+	private globalSettings: Settings; // 全局设置
+	private projectSettings: Settings; // 项目设置
+	private settings: Settings; // 合并后的设置
+	private projectTrusted: boolean; // 交互模式首次进项目，弹 trust 提示框是否信任当前项目
+	// 用户随时可能在session 里通过 /settings 里改选项
+	private modifiedFields = new Set<keyof Settings>(); // 追踪会话期间被修改的全局字段
+	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // 追踪会话期间被修改的全局嵌套字段
+	private modifiedProjectFields = new Set<keyof Settings>(); // 追踪会话期间被修改的项目字段
+	private modifiedProjectNestedFields = new Map<keyof Settings, Set<string>>(); // 追踪会话期间被修改的项目嵌套字段
+	private globalSettingsLoadError: Error | null = null; // 追踪/记录全局设置文件是否存在解析错误
+	private projectSettingsLoadError: Error | null = null; // 追踪/记录项目设置文件是否存在解析错误
+	private writeQueue: Promise<void> = Promise.resolve(); // 写入队列
+	private errors: SettingsError[]; // 错误列表
 
 	private constructor(
 		storage: SettingsStorage,
