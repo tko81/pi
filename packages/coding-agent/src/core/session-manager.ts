@@ -117,16 +117,14 @@ export interface SessionInfoEntry extends SessionEntryBase {
 }
 
 /**
- * Custom message entry for extensions to inject messages into LLM context.
- * Use customType to identify your extension's entries.
- *
- * Unlike CustomEntry, this DOES participate in LLM context.
- * The content is converted to a user message in buildSessionContext().
- * Use details for extension-specific metadata (not sent to LLM).
- *
- * display controls TUI rendering:
- * - false: hidden entirely
- * - true: rendered with distinct styling (different from user messages)
+ * 自定义消息条目，用于扩展将消息注入 LLM 上下文。
+ * 使用 customType 标识扩展的条目。
+ * 与 CustomEntry 不同，这个条目参与 LLM 上下文。
+ * 内容转换为 user 消息在 buildSessionContext() 中。
+ * 使用 details 存储扩展特定的元数据（不发给 LLM）。
+ * display 控制 TUI 渲染：
+ * - false: 完全隐藏
+ * - true: 以不同的样式渲染（不同于 user 消息）
  */
 export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	type: "custom_message";
@@ -183,6 +181,10 @@ export interface SessionInfo {
 	allMessagesText: string;
 }
 
+// 从已有类型里挑部分属性，组成新类型，用于 readonly 只读模式
+// 从 SessionManager 类里只取出列出的那些方法名，拼成类型 ReadonlySessionManager
+// SessionManager 设计上不暴露 sessionId 这类公开字段，用 getter 方法访问
+// 不是不需要 sessionId，是封装成 getSessionId()；Pick 只裁剪方法，所以 type 里全是方法没有属性
 export type ReadonlySessionManager = Pick<
 	SessionManager,
 	| "getCwd"
@@ -223,7 +225,7 @@ function generateId(byId: { has(id: string): boolean }): string {
 	return randomUUID();
 }
 
-/** Migrate v1 → v2: add id/parentId tree structure. Mutates in place. */
+// 迁移 v1 → v2：添加 id/parentId 树结构。就地修改。
 function migrateV1ToV2(entries: FileEntry[]): void {
 	const ids = new Set<string>();
 	let prevId: string | null = null;
@@ -252,7 +254,7 @@ function migrateV1ToV2(entries: FileEntry[]): void {
 	}
 }
 
-/** Migrate v2 → v3: rename hookMessage role to custom. Mutates in place. */
+// 迁移 v2 → v3：重命名 hookMessage role 为 custom。就地修改。
 function migrateV2ToV3(entries: FileEntry[]): void {
 	for (const entry of entries) {
 		if (entry.type === "session") {
@@ -270,28 +272,27 @@ function migrateV2ToV3(entries: FileEntry[]): void {
 	}
 }
 
-/**
- * Run all necessary migrations to bring entries to current version.
- * Mutates entries in place. Returns true if any migration was applied.
- */
+// 迁移到当前版本：运行所有必要的迁移以将条目带到当前版本。就地修改。返回 true 如果任何迁移被应用。
 function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 	const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 	const version = header?.version ?? 1;
-
+	// 如果版本号大于等于当前版本，则不需要迁移
 	if (version >= CURRENT_SESSION_VERSION) return false;
 
+	// 如果版本号小于 2，则迁移 v1 → v2
 	if (version < 2) migrateV1ToV2(entries);
+	// 如果版本号小于 3，则迁移 v2 → v3
 	if (version < 3) migrateV2ToV3(entries);
 
 	return true;
 }
 
-/** Exported for testing */
+// 导出用于测试
 export function migrateSessionEntries(entries: FileEntry[]): void {
 	migrateToCurrentVersion(entries);
 }
 
-/** Exported for compaction.test.ts */
+// 导出用于压缩测试
 export function parseSessionEntries(content: string): FileEntry[] {
 	const entries: FileEntry[] = [];
 	const lines = content.trim().split("\n");
@@ -309,6 +310,7 @@ export function parseSessionEntries(content: string): FileEntry[] {
 	return entries;
 }
 
+// 获取最新的压缩条目
 export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEntry | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		if (entries[i].type === "compaction") {
@@ -318,6 +320,7 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
+// 构建按 id 索引的条目
 function buildEntryIndex(entries: SessionEntry[], byId?: Map<string, SessionEntry>): Map<string, SessionEntry> {
 	if (byId) return byId;
 	const index = new Map<string, SessionEntry>();
@@ -327,44 +330,71 @@ function buildEntryIndex(entries: SessionEntry[], byId?: Map<string, SessionEntr
 	return index;
 }
 
+// 构建会话路径（从根到当前叶子）
 function buildSessionPath(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionEntry[] {
+	// 构建按 id 索引的条目的 Map
 	const index = buildEntryIndex(entries, byId);
+	// 如果 leafId 为 null，则返回空数组
 	let leaf: SessionEntry | undefined;
 	if (leafId === null) {
 		return [];
 	}
+	// 如果 leafId 不为 null，则获取对应的条目（leaf）
 	if (leafId) {
 		leaf = index.get(leafId);
 	}
+	// leaf 是 undefined → 用 entries 数组最后一条当 leaf
 	leaf ??= entries[entries.length - 1];
+	// leaf 还是 undefined → 返回空数组
 	if (!leaf) {
 		return [];
 	}
 
+	// 构建会话路径
 	const path: SessionEntry[] = [];
 	let current: SessionEntry | undefined = leaf;
 	while (current) {
+		// 将当前条目添加到路径中
 		path.push(current);
+		// 获取当前条目的父条目
 		current = current.parentId ? index.get(current.parentId) : undefined;
 	}
+	// 将路径反转，因为构建时是从 leaf 到 root，需要反转成时间序
 	path.reverse();
 	return path;
 }
 
+// 获取会话上下文设置（思考水平和模型）
 function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "thinkingLevel" | "model"> {
+	// 默认思考水平为 off
 	let thinkingLevel = "off";
+	// 默认模型为 null
 	let model: { provider: string; modelId: string } | null = null;
 
+	// 遍历会话路径中的每个条目，根据条目类型更新思考水平和模型
+	// 从 root → leaf 遍历分支，累积 thinkingLevel 和 model，后面的条目覆盖前面的。
+	// 那为什么不直接取最后一个 leaf，而要不停覆盖？因为 leaf 不一定是消息
+	// 活跃路径末端可能是：
+	// user 消息（你刚发完一句）
+	// toolResult
+	// compaction / branch_summary
+	// custom_message
+	// 这些条目没有 provider/model。只读 leaf → 拿不到当前模型。
 	for (const entry of path) {
+		// 如果条目类型为 thinking_level_change，则更新思考水平
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel;
-		} else if (entry.type === "model_change") {
+		}
+		// 如果条目类型为 model_change，则更新模型
+		else if (entry.type === "model_change") {
 			model = { provider: entry.provider, modelId: entry.modelId };
-		} else if (entry.type === "message" && entry.message.role === "assistant") {
+		}
+		// 如果条目类型为 message 且角色为 assistant，则更新模型
+		else if (entry.type === "message" && entry.message.role === "assistant") {
 			model = { provider: entry.message.provider, modelId: entry.message.model };
 		}
 	}
@@ -372,10 +402,8 @@ function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "
 	return { thinkingLevel, model };
 }
 
-/**
- * Project one selected session entry into LLM/runtime messages.
- * Plain custom entries are display/state entries and do not participate in context.
- */
+// 将一个选定的会话条目投影为 LLM/运行时消息。
+// 普通自定义条目是显示/状态条目，不参与上下文。
 export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage[] {
 	if (entry.type === "message") {
 		return [entry.message];
@@ -393,12 +421,18 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 }
 
 /**
- * Build the active, compaction-aware session entry list.
- *
- * This follows the current leaf path. If the path contains compaction entries,
- * the latest compaction is represented by the compaction entry itself, followed
- * by the kept entries starting at firstKeptEntryId and all entries after the
- * compaction entry. Older summarized entries are omitted.
+ * 压缩感知
+ * 拼出「发给模型的有效条目列表」——在活跃分支上，把压缩掉的老消息换成摘要。
+ * 背景：
+ * Session 文件里整棵树都在，但模型不能看全部分支。
+ * 先要 buildSessionPath：从 root 沿 parentId 走到当前 leaf → 活跃路径（时间序）。
+ * 对话太长会插入 compaction 条目：前面旧消息压成 summary，最近一段原文明文保留（firstKeptEntryId 标记从哪条开始留）。
+ * path 上：
+  [m1][m2][m3][m4][m5] → compaction(summary) → [m6][m7]
+              ↑ firstKeptEntryId = m4
+  发给模型的 contextEntries：
+  [compaction] + [m4,m5] + [m6,m7]
+  m1,m2,m3 被省略 → 由 compaction.summary 代替
  */
 export function buildContextEntries(
 	entries: SessionEntry[],
@@ -439,9 +473,11 @@ export function buildContextEntries(
 }
 
 /**
- * Build the session context from entries using tree traversal.
- * If leafId is provided, walks from that entry to root.
- * Handles compaction and branch summaries along the path.
+ * 给 LLM 的最终包
+ * buildSessionContext = 把 JSONL 会话树「投影」成 agent 能用的运行时上下文
+ * 从条目构建会话上下文。
+ * 如果 leafId 提供，则从该条目走到 root。
+ * 处理路径上的压缩和分支摘要。
  */
 export function buildSessionContext(
 	entries: SessionEntry[],
@@ -450,6 +486,7 @@ export function buildSessionContext(
 ): SessionContext {
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
+	// 构建发给模型的有效条目列表
 	const messages = buildContextEntries(entries, leafId, byId).flatMap(sessionEntryToContextMessages);
 	return { messages, thinkingLevel, model };
 }
@@ -767,27 +804,33 @@ async function listSessionsFromDir(
 }
 
 /**
- * Manages conversation sessions as append-only trees stored in JSONL files.
- *
- * Each session entry has an id and parentId forming a tree structure. The "leaf"
- * pointer tracks the current position. Appending creates a child of the current leaf.
- * Branching moves the leaf to an earlier entry, allowing new branches without
- * modifying history.
- *
- * Use buildSessionContext() to get the resolved message list for the LLM, which
- * handles compaction summaries and follows the path from root to current leaf.
+ * SessionManager - 管理对话 sessions，作为「只允许追加」的树存储在 JSONL 文件中
+ * 每个 session 条目都有一个 id 和 parentId 形成一个树结构。"leaf" 指针跟踪当前位置。
+ * 追加创建当前叶子的子级。分支将叶子移动到较早的条目，允许新的分支而不修改历史。
+ * 使用 buildSessionContext() 获取 LLM 的 resolved message list，处理压缩摘要并遵循从根到当前叶子的路径。
  */
 export class SessionManager {
+	/** 会话 id */
 	private sessionId: string = "";
+	/** 会话文件 */
 	private sessionFile: string | undefined;
+	/** 会话目录 */
 	private sessionDir: string;
+	/** 当前工作目录 */
 	private cwd: string;
+	/** 是否持久化到磁盘 */
 	private persist: boolean;
+	/** 是否已刷新到磁盘 */
 	private flushed: boolean = false;
+	/** 文件条目 */
 	private fileEntries: FileEntry[] = [];
+	/** 按 id 索引的条目 */
 	private byId: Map<string, SessionEntry> = new Map();
+	/** 按 id 索引的标签 */
 	private labelsById: Map<string, string> = new Map();
+	/** 按 id 索引的标签时间戳 */	
 	private labelTimestampsById: Map<string, string> = new Map();
+	/** 当前叶子 id */
 	private leafId: string | null = null;
 
 	private constructor(
@@ -797,6 +840,7 @@ export class SessionManager {
 		persist: boolean,
 		newSessionOptions?: NewSessionOptions,
 	) {
+		// 初始化工作目录、会话目录、是否持久化到磁盘
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.persist = persist;
@@ -804,21 +848,25 @@ export class SessionManager {
 			mkdirSync(this.sessionDir, { recursive: true });
 		}
 
+		// 如果提供了会话文件，则切换到该会话文件
 		if (sessionFile) {
 			this.setSessionFile(sessionFile);
 		} else {
+			// 否则创建一个新的会话
 			this.newSession(newSessionOptions);
 		}
 	}
 
-	/** Switch to a different session file (used for resume and branching) */
+	/** 切换到不同的 session 文件（用于 resume 和 branching） */
 	setSessionFile(sessionFile: string): void {
+		// 切换到不同的 session 文件（用于 resume 和 branching）
 		this.sessionFile = resolvePath(sessionFile);
+		// 如果会话文件存在，则加载会话文件
 		if (existsSync(this.sessionFile)) {
+			// 加载会话文件
 			this.fileEntries = loadEntriesFromFile(this.sessionFile);
 
-			// If file was empty, initialize it with a valid session header. If it was
-			// non-empty but did not parse as a pi session, fail without modifying it.
+			// 如果会话文件为空，则初始化一个有效的会话头。如果会话文件不为空但无法解析为 pi 会话，则失败而不修改它。
 			if (this.fileEntries.length === 0) {
 				const explicitPath = this.sessionFile;
 				if (statSync(explicitPath).size > 0) {

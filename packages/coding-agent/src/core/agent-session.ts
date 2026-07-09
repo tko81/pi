@@ -1,16 +1,16 @@
 /**
- * AgentSession - Core abstraction for agent lifecycle and session management.
- *
- * This class is shared between all run modes (interactive, print, rpc).
- * It encapsulates:
- * - Agent state access
- * - Event subscription with automatic session persistence
- * - Model and thinking level management
- * - Compaction (manual and auto)
- * - Bash execution
- * - Session switching and branching
- *
- * Modes use this class and add their own I/O layer on top.
+ * AgentSession - 核心抽象，用于管理 Agent 的生命周期和 session。
+ * 
+ * 这个类在所有运行模式（交互式、打印、RPC）中共享。
+ * 它封装了：
+ * - Agent 状态访问
+ * - 事件订阅，自动 session 持久化
+ * - 模型和思考水平管理
+ * - 压缩（手动和自动）
+ * - Bash 命令执行
+ * - Session 切换和分支
+ * 
+ * 模式使用这个类并添加自己的 I/O 层。
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
