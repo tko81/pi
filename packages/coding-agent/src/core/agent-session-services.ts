@@ -79,8 +79,7 @@ export interface CreateAgentSessionFromServicesOptions {
 /**
  * AgentSessionServices 是一套完整、绑在某个 cwd 上的 runtime service。
  * cwd 定了，里面的 settings、扩展、模型注册表、资源加载器都按这个项目目录配好，彼此一致。
- * 它只是基础设施，不是能对话的 session。没有 prompt()，不管消息流，只管环境备好。
- * AgentSession 另一步再建。
+ * 它只是基础设施，不是能对话的 session。没有 prompt()，不管消息流，只管环境备好，AgentSession 另一步再建。
  * 原因：选 model、tools、thinking 时要先查 modelRegistry、settingsManager——这些都在 services 里。
  * 顺序必须是：先 services → 对着 services 解析选项 → 再 createAgentSession。
  * 这是「厨房设备清单」，不是「正在做的菜」。先装好厨房，再决定做什么菜、用什么锅（model/tools），最后才开火（AgentSession）。
@@ -144,9 +143,17 @@ function applyExtensionFlagValues(
 }
 
 /**
- * Create cwd-bound runtime services.
- *
- * Returns services plus diagnostics. It does not create an AgentSession.
+ * 装「厨房」：绑在某个 cwd 上的基础设施包，不创建 AgentSession，不能 prompt()
+ * 
+ * 做的事：
+ * 建 AuthStorage（auth.json）
+ * 建 SettingsManager（读全局 + 项目 settings.json）
+ * 建 ModelRegistry（models.json + 扩展注册的 provider）
+ * 建 DefaultResourceLoader 并 reload()（按 settings 发现 extensions/skills/prompts/themes）
+ * 注册扩展里的自定义 provider、处理 --extension-flag
+ * 返回 AgentSessionServices + diagnostics
+ * 
+ * 何时重建： cwd 变了（/new、换项目）→ services 整套重做，保证扩展/设置/模型注册表和当前目录一致。
  */
 export async function createAgentSessionServices(
 	options: CreateAgentSessionServicesOptions,
@@ -192,11 +199,19 @@ export async function createAgentSessionServices(
 }
 
 /**
- * Create an AgentSession from previously created services.
- *
- * This keeps session creation separate from service creation so callers can
- * resolve model, thinking, tools, and other session inputs against the target
- * cwd before constructing the session.
+ * 开火做菜：已有 services 的前提下，加上本次会话选项，调底层 SDK 建 session。
+ * 建 session 之前，调用方得先对着目标 cwd 把 model、thinking、tools 等算清楚；
+ * 算这些要依赖 services 里已有的东西（modelRegistry、settingsManager、resourceLoader）
+ * 所以拆三步：
+ * ① createAgentSessionServices(cwd)   → 备好环境
+ * ② 对着 services 解析 model/tools   → buildSessionOptions 等
+ * ③ createAgentSessionFromServices()    → 再建 AgentSession
+ * 
+ * services 绑 cwd。换项目目录 → settings、扩展、skills 路径都变。必须先按这个 cwd 建好 services，再在里面查：
+ * settingsManager.getDefaultModel()
+ * modelRegistry.find(...)
+ * settingsManager.getEnabledModels() → 解析 --models
+ * 不能 cwd 还没定、registry 还没加载就建 session。
  */
 export async function createAgentSessionFromServices(
 	options: CreateAgentSessionFromServicesOptions,

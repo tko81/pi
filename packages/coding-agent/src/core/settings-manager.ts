@@ -111,7 +111,7 @@ export interface TerminalSettings {
 
 /**
  * 发给模型的图片
- * autoResize: 发模型前是否缩到最大 2000×2000，默认 true
+ * autoResize: 发给模型前是否缩到最大 2000×2000，默认 true
  * blockImages: 为 true 时所有图片都不发给 LLM，换成占位文本，默认 false
  */
 export interface ImageSettings {
@@ -187,46 +187,148 @@ export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-	transport?: TransportSetting; // default: "auto"
+	// 参考 代码分析/transport分析.MD
+	transport?: TransportSetting;
+
+	// agent 还在跑时，你可以先打字排队，两条队列、两种快捷键：
+	// steering Enter触发 当前 assistant 回合结束（tool call 跑完）后，立刻插入
+	// follow-up Alt+Enter触发 agent 全部干完（不再 streaming）后再插入
+
+	// steeringMode / followUpMode 控制：到 drain 点时，一次注入几条排队消息
+	// "one-at-a-time" 每次只注入最早 1 条，剩下的下次 drain 再发
+	// "all" 一次把队列里全部消息注入
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
+
 	theme?: string;
 	compaction?: CompactionSettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
-	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
-	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
+	// Ctrl+G 外部编辑器 = 在 Pi 终端输入框里按 Ctrl+G，把当前正在写的消息丢给你熟悉的桌面编辑器（VS Code、vim、nano 等）去改，改完回到 Pi 继续发。
+	// Pi 自带终端内联编辑器，写短句够用；写长 prompt、多行说明、贴大段文字时别扭。Ctrl+G → 临时文件 → 启动外部编辑器 → 保存退出 → 内容回到 Pi 输入框。
+	externalEditor?: string; 
+	// 自定义 shell = 手动指定 Pi 跑 bash 工具时用哪个 shell 可执行文件（zsh/bash...）
+	// Pi agent 会替模型执行 shell 命令，不是直接用你当前终端那个 shell，而是 Pi 自己 spawn 一个子进程来跑
+	shellPath?: string;
+	// 启动时少打日志
 	quietStartup?: boolean;
-	defaultProjectTrust?: DefaultProjectTrust; // default: "ask"; global setting only
-	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
-	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
-	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
-	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
-	enableAnalytics?: boolean; // default: false - opt-in analytics data sharing
-	trackingId?: string; // analytics tracking identifier, generated when analytics is enabled
+	// 新项目默认信不信任
+	defaultProjectTrust?: DefaultProjectTrust;
+	// shellCommandPrefix = 每条 bash 命令执行前，自动拼在前面的一段 shell 脚本
+	// 实现：resolvedCommand = commandPrefix + "\n" + command
+	// 每条 bash 前加前缀（如开 alias）
+	shellCommandPrefix?: string;
+	// 查/装 npm 包用的命令（如 ["mise","exec","node@20","--","npm"]）
+	npmCommand?: string[];
+	// Pi 发现你版本升了（lastChangelogVersion < 当前版本）→ 新 session 启动 → 弹更新说明
+	// 已有消息的 resumed session、全新安装 → 都不走这套。
+	// false（默认）完整 What's New：Markdown 渲染本次升级全部 changelog
+	// true 一行：升级至 vX.Y.Z. 使用 /changelog 命令展示全部 changelog.
+	collapseChangelog?: boolean;
+	// 1. 官方的安装/更新统计后门：首次安装，或 changelog 发现你刚升到新版本时，客户端 → 服务器：「我装/升到这个版本了」，匿名统计安装量、升级量
+	// 2. 为 OpenRouter / NVIDIA NIM / Cloudflare 等请求加来源 attribution headers（标明请求来自 Pi）
+	// 意思：Pi 调某些第三方模型 API 时，在 HTTP 请求里多塞几个 header，告诉对方「这请求是 Pi 这个 CLI 发的」，不是随便哪个网页/脚本
+	enableInstallTelemetry?: boolean;
+	// 可选 analytics 数据共享开关，默认关。属于预留/实验中的 opt-in 开关
+	// 目前主要在实验性首次设置（PI_EXPERIMENTAL=1）里问用户要不要开；用户选「分享 analytics」→ setEnableAnalytics(true) 写入全局 settings.json
+	enableAnalytics?: boolean;
+	// analytics 用的匿名设备 ID
+	// 只有 setEnableAnalytics(true) 且还没有 id 时，才 randomUUID() 生成并持久化
+	// 关 analytics 不会删 id；再开 analytics 会复用同一个 id（测试里验证了）
+	trackingId?: string;
+	// packages → 远程/可安装包，pi 会 npm install 或 git clone 到 ~/.pi/agent/npm|git/ 或 .pi/npm|git/
+	// packages 不替代 下面四个字段，而是另一种来源
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
-	extensions?: string[]; // Array of local extension file paths or directories
-	skills?: string[]; // Array of local skill file paths or directories
-	prompts?: string[]; // Array of local prompt template paths or directories
-	themes?: string[]; // Array of local theme file paths or directories
-	enableSkillCommands?: boolean; // default: true - register skills as /skill:name commands
+	// 挂生命周期事件、注册 LLM 工具、/command、改 UI、拦截 tool call 等，会执行代码
+	extensions?: string[];
+	// 给模型看的专项工作流/说明/脚本指引。符合 Agent Skills 标准。可注册成 /skill:name
+	skills?: string[];
+	// 编辑器里打 /模板名 展开成完整 prompt，支持 $1、$@ 等占位符
+	prompts?: string[];
+	// 定义 TUI 颜色 token（dark/light 之外自定义主题）
+	themes?: string[];
+
+	// 是否把已加载的 skill 注册成 /skill:name 斜杠命令
+	// true（默认） → 自动补全里出现 /skill:pdf-tools 等；输入后展开成完整 skill 内容发给模型
+	// false → 没有这些命令，skill 仍可通过 system prompt 里的描述让模型按需 read SKILL.md
+
+	// 和自动加载的区别：
+	// system prompt 只放 skill 名称+描述（渐进披露）
+	// /skill:name 是你主动触发，直接把 SKILL.md 全文塞进输入
+	// 设 disable-model-invocation: true 的 skill 不进 system prompt，只能靠 /skill:name 调用 → 此时必须 enableSkillCommands: true。
+	enableSkillCommands?: boolean;
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
-	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
-	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
+
+	// 限制 模型轮换 的候选列表，格式同 CLI --models（默认不设 = 全部模型）
+	// 未设 → 所有已配置 auth 的模型都可轮换
+	// 设了 → Ctrl+P / 模型轮换，只在这批模型里切
+	// 注意： 这是轮换范围，不是「禁止用别的模型」——你仍可在 /model 里手动选列表外的模型
+	enabledModels?: string[];
+	
+	// 输入框为空时，500ms 内连按两次 Esc 触发的动作（默认 "tree"）
+	// "tree" 打开 /tree 会话树选择器（同一会话内切分支）
+	// "fork" 打开 fork 选择器（从历史 user 消息 fork 到新会话文件）
+	// "none" 不做事
+	doubleEscapeAction?: "fork" | "tree" | "none";
+
+	// 打开 /tree 时默认显示哪些节点。树内仍可用 Ctrl+O 临时切换过滤
+	// default 常规视图；隐藏 label/custom/model_change 等 bookkeeping；隐藏「只有 tool call、无文字」的 assistant 消息
+	// no-tools default 基础上再隐藏 tool result
+	// user-only 只看 user 消息
+	// labeled-only 只看打了 label 的节点（Shift+L 标记）
+	// all 全部条目，含设置变更、tool result 等
+	// 注意：长会话树很乱时，设 user-only 或 no-tools 能更快定位分支点。
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
-	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
-	outputPad?: 0 | 1; // Horizontal padding for chat message output (default: 1)
-	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
+	// 输入框左右留白（默认 0，范围 0–3） 终端窄或想输入区和聊天区对齐时可调 /settings 可改，立即生效
+	editorPaddingX?: number;
+	// 聊天输出左右留白——user 消息、assistant 回复、thinking 块、错误文本。
+	// 1 → 内容离左边缘空 1 格（默认，更易读）
+	// 0 → 贴边，多挤一点横向空间
+	// 传给 UserMessage / AssistantMessage 等 TUI 组件的 padding 参数，纯视觉，不影响逻辑
+	outputPad?: 0 | 1;
+	// 输入框自动补全下拉框最多显示几条
+	// 默认 5，范围 3–20
+	// 输入 /、路径、@ 等触发补全时生效
+	// 在 Editor 里传给 SelectList 控制高度；项多时可滚动，只是可见行数变
+	autocompleteMaxVisible?: number;
+	// 终端实体光标是否显示
+	// Pi TUI 自己画输入区，默认隐藏硬件光标（界面更干净），但仍用 ANSI 把光标挪到正确位置——给 IME 输入法（中文等）定位候选框用。
+	// 默认 false（隐藏）
+	// true → 定位后调用 showCursor()，你能看到闪烁光标
+	// 环境变量 PI_HARDWARE_CURSOR=1 等效
+	// 典型场景： WSL + WezTerm 打中文，候选框跟不准输入位置 → 开这个。
+	// 候选框 = 输入法打中文/日文时，光标附近弹出的选字/选词小窗口。
+	// 例：拼音打 nihao → 候选框显示 你好 你好 泥好… 你选一条上屏。
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
-	httpProxy?: string; // Proxy URL applied as HTTP_PROXY and HTTPS_PROXY for Pi-managed HTTP clients
-	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
-	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
+	// Pi 出站 HTTP/HTTPS 走代理用的
+	// 典型用途：
+	// 调 OpenAI、Anthropic 等模型 API
+	// 版本检查、包更新检查
+	// 其他 Pi 发起的网络请求
+	httpProxy?: string;
+	// HTTP 请求空闲超时（毫秒）——等响应头/响应体时，多久没数据算超时 默认 300000（5 分钟）
+	// 0 = 禁用（内部会转成 2147483647，因为各 SDK 把 0 当立即超时）
+	// 两处用法：
+	// 全局 HTTP 客户端（undici）：headersTimeout + bodyTimeout
+	// 调模型 API：作为 streamSimple 的 timeoutMs，覆盖 OpenAI、Codex、llama.cpp 等 provider 的单次请求超时；Codex WebSocket 空闲等待也用它
+	
+	// /settings 里可选 30s / 1min / 2min / 5min / disabled。
+	// 注意： 这是空闲超时，不是「整次对话总时长」。模型慢慢吐 token 时连接有数据，一般不会因这个断；卡住没响应才会超时。
+	httpIdleTimeoutMs?: number;
+	// WebSocket 握手/建连阶段超时（毫秒），只管「连上没」，不管后面流式多久
+	// 未配置时 provider 侧默认 15000（15s）
+	// 0 = 不限制建连等待
+	// 主要给走 WebSocket 的 provider（如 OpenAI Codex Responses + transport: websocket）
+
+	// websocketConnectTimeoutMs WS 握手能不能连上
+	// httpIdleTimeoutMs 连上之后 HTTP/WS 流多久没数据
+	websocketConnectTimeoutMs?: number;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -250,9 +352,10 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 			baseValue !== null &&
 			!Array.isArray(baseValue)
 		) {
+			// 两边都是普通对象（非数组）→ 浅合并
 			(result as Record<string, unknown>)[key] = { ...baseValue, ...overrideValue };
 		} else {
-			// For primitives and arrays, override value wins
+			// 其他（原始值、数组）→ 直接覆盖
 			(result as Record<string, unknown>)[key] = overrideValue;
 		}
 	}
@@ -278,6 +381,7 @@ export interface SettingsManagerCreateOptions {
 }
 
 export interface SettingsStorage {
+	// 加锁保证并发读写的原子性
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
 }
 
@@ -297,11 +401,12 @@ export class FileSettingsStorage implements SettingsStorage {
 		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
 	}
 
+	// 加锁保证并发读写的原子性
 	private acquireLockSyncWithRetry(path: string): () => void {
 		const maxAttempts = 10;
 		const delayMs = 20;
 		let lastError: unknown;
-
+		// 重试多次，直到加锁成功或达到最大重试次数
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			try {
 				return lockfile.lockSync(path, { realpath: false });
@@ -330,24 +435,31 @@ export class FileSettingsStorage implements SettingsStorage {
 
 		let release: (() => void) | undefined;
 		try {
-			// Only create directory and lock if file exists or we need to write
+			// 检查文件是否存在
 			const fileExists = existsSync(path);
 			if (fileExists) {
+				// 加锁
 				release = this.acquireLockSyncWithRetry(path);
 			}
+			// 读取文件内容
 			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
+			// 调用回调函数，传入当前内容
 			const next = fn(current);
+			// 如果回调函数返回了新的内容
 			if (next !== undefined) {
-				// Only create directory when we actually need to write
+				// 如果目录不存在，则创建目录
 				if (!existsSync(dir)) {
 					mkdirSync(dir, { recursive: true });
 				}
+				// 如果锁不存在，则加锁
 				if (!release) {
 					release = this.acquireLockSyncWithRetry(path);
 				}
+				// 写入文件
 				writeFileSync(path, next, "utf-8");
 			}
 		} finally {
+			// 释放锁
 			if (release) {
 				release();
 			}
@@ -358,14 +470,19 @@ export class FileSettingsStorage implements SettingsStorage {
 export class InMemorySettingsStorage implements SettingsStorage {
 	private global: string | undefined;
 	private project: string | undefined;
-
+	// 设计意图：加锁保证并发读写的原子性
+	// 实际上：单进程测试用，没有并发写同一文件的问题，不需要文件锁
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
 		const current = scope === "global" ? this.global : this.project;
+		// 调用回调函数，传入当前内容
 		const next = fn(current);
+		// 如果回调函数返回了新的内容
 		if (next !== undefined) {
+			// 如果 scope 是 global，则更新 global
 			if (scope === "global") {
 				this.global = next;
 			} else {
+				// 如果 scope 是 project，则更新 project
 				this.project = next;
 			}
 		}
@@ -408,7 +525,7 @@ export class SettingsManager {
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
 	}
 
-	/** Create a SettingsManager that loads from files */
+	/** 从磁盘文件创建 SettingsManager */
 	static create(
 		cwd: string,
 		agentDir: string = getAgentDir(),
@@ -418,10 +535,12 @@ export class SettingsManager {
 		return SettingsManager.fromStorage(storage, options);
 	}
 
-	/** Create a SettingsManager from an arbitrary storage backend */
+	/** 从任意存储后端创建 SettingsManager */
 	static fromStorage(storage: SettingsStorage, options: SettingsManagerCreateOptions = {}): SettingsManager {
 		const projectTrusted = options.projectTrusted ?? true;
 		const globalLoad = SettingsManager.tryLoadFromStorage(storage, "global");
+		// projectTrusted: false 时不读项目 settings，当作 {}
+		// 不信任项目时不加载 <cwd>/.pi/settings.json，只读全局 settings。
 		const projectLoad = SettingsManager.tryLoadFromStorage(storage, "project", projectTrusted);
 		const initialErrors: SettingsError[] = [];
 		if (globalLoad.error) {
@@ -430,7 +549,8 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			initialErrors.push({ scope: "project", error: projectLoad.error });
 		}
-
+		// 用上面查到的全局、项目 settings，以及错误列表，创建 SettingsManager
+		// SettingsManager 的构造函数内有根据 projectTrusted 合并全局、项目 settings 的逻辑
 		return new SettingsManager(
 			storage,
 			globalLoad.settings,
