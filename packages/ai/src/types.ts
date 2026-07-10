@@ -107,34 +107,46 @@ export interface ProviderResponse {
 }
 
 export interface StreamOptions {
+	// 温度，控制输出随机性。值越低 (如0.1) 输出越确定和保守；值越高 (如0.9) 输出越有创造性和随机性。
 	temperature?: number;
+	// 最大输出 Token 数，限制模型生成内容的最大长度，用于控制成本和响应时间。
 	maxTokens?: number;
+	// 取消信号，用于在流式传输过程中，从外部主动取消一个正在进行的请求，例如用户点击了"停止生成"按钮。
 	signal?: AbortSignal;
+	// 可选的 API 密钥，用于授权 API 请求
 	apiKey?: string;
 	/**
 	 * Preferred transport for providers that support multiple transports.
 	 * Providers that do not support this option ignore it.
+	 * 传输协议偏好。某些提供商支持多种传输协议。此选项允许你指定首选的传输方式，不支持的提供商会忽略。
 	 */
 	transport?: Transport;
 	/**
 	 * Prompt cache retention preference. Providers map this to their supported values.
 	 * Default: "short".
+	 * 提示缓存保留策略。用于控制请求的缓存保留时长。"short" 是默认值，具体实现取决于提供商。
 	 */
 	cacheRetention?: CacheRetention;
 	/**
 	 * Optional session identifier for providers that support session-based caching.
 	 * Providers can use this to enable prompt caching, request routing, or other
 	 * session-aware features. Ignored by providers that don't support it.
+	 * 会话标识符。用于支持基于会话的缓存、请求路由等高级功能。
+	 * 如果提供商支持，可以通过此 ID 关联同一会话中的多个请求，提升效率。
 	 */
 	sessionId?: string;
 	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
 	 * Return undefined to keep the payload unchanged.
+	 * 负载（Payload）检查/修改回调。在请求被发送之前调用，允许你查看甚至修改发往 AI 提供商API的最终请求体。
+	 * 可用于日志记录、调试或注入特殊字段。
 	 */
 	onPayload?: (payload: unknown, model: Model<Api>) => unknown | undefined | Promise<unknown | undefined>;
 	/**
 	 * Optional callback invoked after an HTTP response is received and before
 	 * its body stream is consumed.
+	 * 响应接收回调。在 HTTP 响应被接收、但响应流被消费之前调用。
+	 * 可以用于检查响应头、状态码或进行非侵入式的日志记录。
 	 */
 	onResponse?: (response: ProviderResponse, model: Model<Api>) => void | Promise<void>;
 	/**
@@ -144,22 +156,31 @@ export interface StreamOptions {
 	 * they are covered by SigV4 signing; reserved headers (`x-amz-*`,
 	 * `authorization`, `host`) are silently ignored to preserve SigV4 / bearer auth.
 	 * A null value suppresses a provider/API default header with the same name.
+	 * 
+	 * 自定义 HTTP 请求头。用于添加或覆盖请求头。一个关键设计是：null 值可以抑制提供商默认会发送的同名头。
+	 * 在 AWS Bedrock 等场景下，特定头（如 x-amz-*）会被忽略以保证签名安全。
 	 */
 	headers?: ProviderHeaders;
 	/**
 	 * HTTP request timeout in milliseconds for providers/SDKs that support it.
 	 * For example, OpenAI and Anthropic SDK clients default to 10 minutes.
+	 * HTTP 请求超时时间（毫秒）。限制整个 HTTP 请求的时长，超过此时间将中断请求。
+	 * 例如，OpenAI 和 Anthropic SDK 客户端默认设置为 10 分钟。
 	 */
 	timeoutMs?: number;
 	/**
 	 * WebSocket connect timeout in milliseconds for providers that support
 	 * WebSocket transports. This covers the connection/open handshake only;
 	 * stream idleness after connection uses timeoutMs.
+	 * WebSocket 连接超时（毫秒）。仅当使用 WebSocket 传输时有效，限制建立连接（握手）阶段的时间。
+	 * 连接建立后的空闲超时则由 timeoutMs 控制。
 	 */
 	websocketConnectTimeoutMs?: number;
 	/**
 	 * Maximum retry attempts for providers/SDKs that support client-side retries.
 	 * For example, OpenAI and Anthropic SDK clients default to 2.
+	 * 最大重试次数。当请求遇到可恢复的错误（如网络抖动、速率限制）时，SDK 自动重试的最大次数。
+	 * 例如，OpenAI 和 Anthropic SDK 客户端默认设置为 2 次。
 	 */
 	maxRetries?: number;
 	/**
@@ -168,18 +189,26 @@ export interface StreamOptions {
 	 * with an error containing the requested delay, allowing higher-level retry logic
 	 * to handle it with user visibility.
 	 * Default: 60000 (60 seconds). Set to 0 to disable the cap.
+	 * 
+	 * 最大重试延迟（毫秒）。当服务器要求客户端等待特定时间后重试时，此参数设置一个上限。
+	 * 如果服务器要求的等待时间超过此值，请求会立即失败并返回错误，将控制权交还给上层逻辑
+	 * （比如让用户决定是否继续等待）。默认 60 秒，可设为 0 禁用此限制。
 	 */
 	maxRetryDelayMs?: number;
 	/**
 	 * Optional metadata to include in API requests.
 	 * Providers extract the fields they understand and ignore the rest.
 	 * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.
+	 * 元数据。包含一些额外的键值对，提供商可以提取并用于内部功能。
+	 * 例如，Anthropic 会提取 user_id 字段用于滥用量跟踪或速率限制。
 	 */
 	metadata?: Record<string, unknown>;
 	/**
 	 * Provider-scoped environment values. These take precedence over process.env for
 	 * provider configuration such as regional settings, endpoint placeholders, and
 	 * proxy variables.
+	 * Provider 作用域的环境变量。允许为特定的模型调用提供独立的环境变量（如区域设置、代理变量）。
+	 * 这比直接修改 process.env 更安全和灵活，因为它的作用域仅限于这一次调用。
 	 */
 	env?: ProviderEnv;
 }
@@ -287,9 +316,12 @@ export interface ImagesOptions {
 export type ProviderImagesOptions = ImagesOptions & Record<string, unknown>;
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
+// 统一的选项参数，包含推理（reasoning）配置，会同时传递给 streamSimple() 和 completeSimple() 两个方法
 export interface SimpleStreamOptions extends StreamOptions {
+	// 一个可选（?）字段，用于控制 AI 的推理深度/模式
 	reasoning?: ThinkingLevel;
 	/** Custom token budgets for thinking levels (token-based providers only) */
+	// 可选的自定义 Token 预算配置。仅对按 Token 计费的模型提供商有效（如 OpenAI、Anthropic 等）
 	thinkingBudgets?: ThinkingBudgets;
 }
 
