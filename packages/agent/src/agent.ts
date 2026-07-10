@@ -57,6 +57,8 @@ const DEFAULT_MODEL = {
 	maxTokens: 0,
 } satisfies Model<any>;
 
+// Omit 删掉只读约束，再加可变类型——对外只读、对内可改，TypeScript 常见写法
+// get state() 返回的仍是只读语义（实际仍是同一对象，但类型上外部不应依赖可变性）
 type MutableAgentState = Omit<AgentState, "isStreaming" | "streamingMessage" | "pendingToolCalls" | "errorMessage"> & {
 	isStreaming: boolean;
 	streamingMessage?: AgentMessage;
@@ -164,33 +166,48 @@ type ActiveRun = {
 
 /**
  * Stateful wrapper around the low-level agent loop.
- *
+ * 
  * `Agent` owns the current transcript, emits lifecycle events, executes tools,
  * and exposes queueing APIs for steering and follow-up messages.
+ * 
+ * 底层 Agent 循环的有状态包装器
+ * Agent 拥有当前的对话记录（transcript），发出生命周期事件，执行工具
+ * 并暴露用于 steering 和 follow-up 消息的队列化 API
  */
 export class Agent {
+	// 外部可见的 AgentState 对象，对外只读、对内可改
 	private _state: MutableAgentState;
+	// 监听器集合，用于在 agent 生命周期内订阅事件
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
 	private readonly steeringQueue: PendingMessageQueue;
 	private readonly followUpQueue: PendingMessageQueue;
-
+	// 转换为 LLM 消息的函数，用于将 AgentMessage 转换为 Message 数组
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	// 转换上下文的函数，用于将 AgentMessage 转换为 AgentContext 对象
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	// 流式函数，用于流式输出结果
 	public streamFn: StreamFn;
+	// 获取 API 密钥的函数，用于获取 API 密钥
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+	// 在流式响应期间调用的回调函数，用于处理流式响应的 payload
 	public onPayload?: SimpleStreamOptions["onPayload"];
+	// 在流式响应期间调用的回调函数，用于处理流式响应的 response
 	public onResponse?: SimpleStreamOptions["onResponse"];
+	// 在工具调用之前调用的回调函数，用于处理工具调用前的上下文
 	public beforeToolCall?: (
 		context: BeforeToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<BeforeToolCallResult | undefined>;
+	// 在工具调用之后调用的回调函数，用于处理工具调用后的上下文
 	public afterToolCall?: (
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
+	// 准备下一个 turn 的函数，用于准备下一个 turn 的上下文
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	// 准备下一个 turn 的函数，用于准备下一个 turn 的上下文
 	public prepareNextTurnWithContext?: (
 		context: PrepareNextTurnContext,
 		signal?: AbortSignal,
