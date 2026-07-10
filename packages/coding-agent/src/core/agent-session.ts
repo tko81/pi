@@ -216,9 +216,17 @@ export interface PromptOptions {
 	*/
 	source?: InputSource;
 
-	// RPC 模式下用于观察 prompt 预检查接受或拒绝的内部钩子
-	// preflightResult接受一个函数，参数 success（true = 预检通过；false = 预检被拒）
-	// 告诉调用方「这条输入有没有被接受」，早于整轮 agent 跑完
+	// prompt() 还没跑完整轮 agent，就先告诉调用方「这条输入接没接住」
+	// 典型用法：RPC 模式
+	// 外部客户端发 prompt 命令，需要 尽早回 ACK，不能等 LLM 跑完
+
+	// 什么时候 true / false
+	// 场景			回调
+	// 扩展命令 		已处理 true（1059）
+	// input 处理器 handled 		true（1076）
+	// 流式中 steer/followUp 排队成功 		true（1105）
+	// 校验通过，即将 _runAgentPrompt 		true（1204）
+	// 预检抛错（无 model、无 API key、流式没指定 behavior…） false（1196）后 rethrow
 	preflightResult?: (success: boolean) => void;
 }
 
@@ -503,6 +511,7 @@ export class AgentSession {
 	// =========================================================================
 
 	/** Emit an event to all listeners */
+	// 遍历所有监听器，依次调用它们的回调函数
 	private _emit(event: AgentSessionEvent): void {
 		for (const l of this._eventListeners) {
 			l(event);
@@ -518,6 +527,7 @@ export class AgentSession {
 	}
 
 	// Track last assistant message for auto-compaction check
+	// 为了进行自动上下文压缩检查，而追踪最近的一条助手消息
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
@@ -988,22 +998,42 @@ export class AgentSession {
 				await this.agent.continue();
 			}
 		} finally {
+			// 在本次运行中，可能临时给AI设定过特殊的“角色指令”（比如“你现在是一个数据分析师”）。
+			// 任务结束后必须重置，避免这个特殊指令污染下一次对话。
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
 		}
 	}
 
+	// 检查AI本轮工作的结果，然后决定流程是应该结束，还是需要重试、压缩记忆、或处理新任务。
+	// 在AI代理的循环中（prompt -> _handlePostAgentRun -> 可能 continue），最核心的矛盾是：
+	// “AI回答完一句话，并不意味着整个任务就结束了。”
+	// 因为AI在回答时，可能会：
+	// 需要执行外部工具（比如“我查一下数据库再回复你”）。
+	// 需要补充信息（比如“刚才的结果不够，我再算一次”）。
+	// 需要清理或维护自身状态（比如“对话太长了，我先总结一下之前的聊天”）。
+	// 被外部插件临时添加了新任务（比如“任务完成后，顺便记录一下日志”）。
+	// _handlePostAgentRun 就是用来解决这个矛盾的：它分析AI的每次回答，判断是否需要再次调用AI（通过continue）来完成后续工作，直到AI给出真正的最终答案。
+
+	// 返回值 true：意味着“还需要继续”。外层循环会调用 this.agent.continue() 让AI接着干。
+	// 返回值 false：意味着“处理完成”。外层循环会结束。
 	private async _handlePostAgentRun(): Promise<boolean> {
+		// 取走暂存的AI回复，并把槽位清空（避免重复处理）
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
 		if (!msg) {
 			return false;
 		}
-
+		// 检查这条消息是否是可重试的错误，如果可以重试，则调用 _prepareRetry 方法做准备
+		// 返回值：false：比如重试功能未开启、已达最大重试次数、等待被取消等，告知外层停止循环，结束任务。
+		// 否则：如果经过判断应该让 agent 继续（继续重试），则返回 true。
 		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
 			return true;
 		}
 
+		// AI因为错误停止了，而且已经重试过（_retryAttempt > 0），但最终还是失败了
+		// 发送一个“自动重试结束”事件，通知外部监听器（比如UI界面）：“我尽力了，重试了N次，还是失败了，这是最终错误信息。”
+		// 这里没有 return，因为即使重试失败，流程还会继续往下走，可能进行其他检查或正常结束。
 		if (msg.stopReason === "error" && this._retryAttempt > 0) {
 			this._emit({
 				type: "auto_retry_end",
@@ -1014,12 +1044,33 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
+		// 检查是否需要进行上下文压缩
 		if (await this._checkCompaction(msg)) {
 			return true;
 		}
 
 		// The agent loop drains both queues before emitting agent_end. Any messages
 		// here were queued by agent_end extension handlers and need a continuation.
+		// 代理循环在发出 agent_end 事件之前，会先清空两个队列。
+		// 如果此时（_handlePostAgentRun 被调用时）还有消息，那它们是由 agent_end 扩展处理器（handlers）排队进来的。
+		// 这是一个时序特例：正常循环应该在 agent_end 事件前就结束。但如果有扩展（Extension）在监听 agent_end 事件
+		// 并且在事件处理函数中异步添加了新消息（比如“任务结束了，顺便再帮我记个日志”），那么这些消息就会在队列本该为空的时候出现。
+		// 这些消息需要一次“继续”（continuation）来处理。
+		// 因为队列里有了新任务，不能直接结束。必须返回 true，触发外层的 continue()，让代理再运行一轮，把这些新消息处理掉。
+
+		// 为什么会有这种设计？—— 一个具体场景
+		// 假设你有一个扩展，它的功能是：每次AI任务结束时，自动发送一封“任务完成”的邮件通知。
+		// 正常流程：AI回答完问题 → 所有队列为空 → 触发 agent_end 事件。
+		// 扩展介入：扩展监听到 agent_end 事件，执行发送邮件的逻辑。
+		// 问题出现：发送邮件这个操作，本身会产生一条新消息（比如“邮件发送成功，这是回执ID：123”），这条消息被推入了代理的消息队列。
+		// 此时的状态：
+		// agent_end 事件已经发出了，但队列里又多了新消息。
+		// 如果直接结束，这条“邮件回执”消息就永远丢失了，用户看不到。
+		// 解决方案（这条注释描述的逻辑）：
+		// _handlePostAgentRun() 在最后一步检查 hasQueuedMessages()。
+		// 发现有消息（邮件回执），返回 true。
+		// 外层循环调用 continue()，让AI处理这条“邮件回执”消息，把它显示给用户或存入历史。
+		// 处理完后，队列再次为空，下次调用 _handlePostAgentRun() 时返回 false，任务才真正结束。
 		return this.agent.hasQueuedMessages();
 	}
 
@@ -1039,7 +1090,8 @@ export class AgentSession {
 	 * @throws 如果未选择模型或没有 API 密钥（在非流式处理时），则抛出错误
 	 */
 
-	// extension commands 和 extensions 注意区分，前者是/command 命令，后者是钩子函数
+	// extension commands 和 extensions 注意区分，前者是/command 命令，后者是钩子（一整块 TS 插件）
+	// 函数整体职责：它不是“回答”，而是“准备回答”
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		// 是否展开 prompt 模板
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
@@ -1049,10 +1101,12 @@ export class AgentSession {
 		let messages: AgentMessage[] | undefined;
 
 		try {
-			// Handle extension commands first (execute immediately, even during streaming)
-			// Extension commands manage their own LLM interaction via pi.sendMessage()
+
+			// 阶段一：快速通道 —— 处理“/”开头的扩展命令
+			// 作用：如果用户输入以 / 开头（比如 /help、/login），先尝试作为扩展命令直接执行。
+			// 特点：这些命令由扩展自己管理AI交互（通过 pi.sendMessage()），不经过主代理流程。执行后直接返回，不继续往下走。
+			// 比喻：客户进门直接喊“我要找你们经理！”，前台直接转接，不按常规接待流程走。
 			if (expandPromptTemplates && text.startsWith("/")) {
-				// 尝试执行扩展命令
 				const handled = await this._tryExecuteExtensionCommand(text);
 				if (handled) {
 					// 扩展命令执行了，没有 prompt 要发了
@@ -1060,12 +1114,17 @@ export class AgentSession {
 					return;
 				}
 			}
-
-			// prompt() 处理顺序里，这一步在「展开 skill/模板」之前，先让扩展有机会拦截或改写原始输入
+			
+			// 阶段二：扩展拦截 —— 在模板展开前“偷看”并修改输入
+			// 作用：在展开 skill 或 template 之前，让所有监听 input 事件的扩展有机会：
+			// - handled：直接处理掉这个输入（比如“帮我保存一下这段对话”），不再继续。
+			// - transform：改写用户的输入文本或图片（比如自动补全、翻译成英文），用改写后的内容继续。
+			// 比喻：客户在大厅说的话，被一个“隐形助手”先听了，如果是有特殊需求的VIP，直接带走；如果是普通需求，可能帮你把话整理得更清晰再传给后面。
 			let currentText = text;
 			let currentImages = options?.images;
-			// 如果有扩展输入事件（input event handler）处理器，先发 InputEvent 让扩展有机会拦截或改写原始输入
+			// 如果有输入事件（input event handler）钩子，先发 InputEvent 让扩展有机会拦截或改写原始输入
 			if (this._extensionRunner.hasHandlers("input")) {
+
 				const inputResult = await this._extensionRunner.emitInput(
 					currentText,
 					currentImages,
@@ -1082,37 +1141,48 @@ export class AgentSession {
 				}
 			}
 
-			// 展开 skill (/skill:name args) 命令和 prompt 模板 (/template args)
+			// 阶段三：模板展开 —— 把简写变成完整指令
+			// 作用：把用户输入中的快捷指令展开成完整内容。
+			// _expandSkillCommand：比如把 /code-review 展开成“请以资深工程师视角，审查以下代码...”
+			// expandPromptTemplate：把 {{今天的日期}} 替换成实际日期。
+			// 比喻：客户说“老样子”，前台把它翻译成“一杯美式咖啡，少糖，加一份浓缩”。
 			let expandedText = currentText;
 			if (expandPromptTemplates) {
 				expandedText = this._expandSkillCommand(expandedText);
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
 
-			// 流式进行中 → 必须排队
-			//  - isStreaming === true 时不能立刻开新轮，要指定 streamingBehavior（steer() 或 followUp()）
+			// 阶段四：流式冲突处理 —— 如果AI正在说话，排队等待
+			//  作用：如果AI正在流式输出中（isStreaming === true），不能立刻打断它。必须根据参数决定：
+			// followUp：排队，等AI说完后接着说（作为后续追问）。
+			// steer：排队，等AI说完后转向（作为新的引导，改变当前话题方向）。
+			// 比喻：AI正在电话里和客户A说话，客户B来了。前台会问“你要等还是打断？”，等就请客户B坐沙发等；打断就按“保持通话”键，让客户B先插话。
 			if (this.isStreaming) {
+				// 如果没指定 streamingBehavior，抛错
 				if (!options?.streamingBehavior) {
 					throw new Error(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
 				}
+				// 根据 streamingBehavior 决定是队列到 followUp 还是 steer
 				if (options.streamingBehavior === "followUp") {
 					await this._queueFollowUp(expandedText, currentImages);
 				} else {
 					await this._queueSteer(expandedText, currentImages);
 				}
+				// 预检查成功
 				preflightResult?.(true);
 				return;
 			}
 
-			// 刷新任何挂起的 bash 消息，在新的 prompt 之前
-			// 用户跑 !command / executeBash 时，recordBashResult 会记一条 role: "bashExecution" 消息。
-			// 若当时 agent 正在流式（isStreaming === true），不能立刻 push 到 agent.state.messages——会破坏 tool_use / tool_result 顺序。
-			// 先放进 _pendingBashMessages 队列
+			// 阶段五：刷新挂起的Bash消息 —— 确保命令输出不丢失
+			// 作用：把之前执行Bash命令时暂存的输出，正式写入代理状态和会话历史。
+			// 为什么在这里刷？ 因为如果AI正在流式输出，Bash结果不能直接插入（会破坏消息顺序），所以先暂存在 _pendingBashMessages。
+			// 现在AI不在流式状态，正是安全写入的时机（消息顺序不会被打乱）
 			this._flushPendingBashMessages();
 
-			// 校验模型
+			// 阶段六：模型与认证检查
+			// 作用：确保有可用的模型和有效的API密钥。
 			if (!this.model) {
 				throw new Error(formatNoModelSelectedMessage());
 			}
@@ -1135,15 +1205,20 @@ export class AgentSession {
 
 			// Check if we need to compact before sending (catches aborted responses).
 			// The user's new prompt is sent below, so do not call agent.continue() here.
+			// 阶段七：上下文压缩检查（防御性）
+			// 作用：在发送用户的新问题之前，检查最近的AI回复是否导致对话历史过长。如果是，先触发压缩，但不会自动继续（不响应旧问题，因为新提示马上就来）。
+			// 关键参数 false：表示“只检查，不要自动调用continue()”，因为接下来我们就会发送新消息。
 			const lastAssistant = this._findLastAssistantMessage();
 			if (lastAssistant) {
 				await this._checkCompaction(lastAssistant, false);
 			}
 
-			// Build messages array (custom message if any, then user message)
+			// 阶段八：组装最终消息数组
+			// 最终消息结构：[用户消息, 挂起的下一轮消息, 扩展注入的自定义消息]
+			// 扩展可修改系统提示：让插件能临时改变AI的角色设定（比如“你现在是一个代码审查专家”）。
 			messages = [];
 
-			// Add user message
+			// 添加用户消息（文本+图片）
 			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
 			if (currentImages) {
 				userContent.push(...currentImages);
@@ -1155,19 +1230,21 @@ export class AgentSession {
 			});
 
 			// Inject any pending "nextTurn" messages as context alongside the user message
+			// 注入挂起的"下一轮"消息作为上下文，与用户消息一起发送
 			for (const msg of this._pendingNextTurnMessages) {
 				messages.push(msg);
 			}
 			this._pendingNextTurnMessages = [];
 
 			// Emit before_agent_start extension event
+			// 发射 before_agent_start 事件，允许扩展注入自定义消息或修改系统提示
 			const result = await this._extensionRunner.emitBeforeAgentStart(
 				expandedText,
 				currentImages,
 				this._baseSystemPrompt,
 				this._baseSystemPromptOptions,
 			);
-			// Add all custom messages from extensions
+			// 添加所有扩展注入的自定义消息
 			if (result?.messages) {
 				for (const msg of result.messages) {
 					messages.push({
@@ -1186,6 +1263,7 @@ export class AgentSession {
 				this.agent.state.systemPrompt = result.systemPrompt;
 			} else {
 				// Ensure we're using the base prompt (in case previous turn had modifications)
+				// 恢复为基础系统提示
 				this._systemPromptOverride = undefined;
 				this.agent.state.systemPrompt = this._baseSystemPrompt;
 			}
@@ -1368,6 +1446,31 @@ export class AgentSession {
 	 * @param options.triggerTurn If true and not streaming, triggers a new LLM turn
 	 * @param options.deliverAs Delivery mode: "steer", "followUp", or "nextTurn"
 	 */
+	// 向对话中发送自定义消息的统一入口，它根据系统当前所处的状态，智能地决定这条消息应该被放在哪里、以及是否需要触发AI的下一步行动
+	// 把一条自定义消息（CustomMessage）塞到对话流程的正确位置。但“正确位置”取决于三个因素：
+	// - 系统当前是否在流式输出中（isStreaming）？
+	// - 调用者是否要求触发新一轮AI交互（triggerTurn）？
+	// - 调用者指定了哪种送达方式（deliverAs）？
+	
+	// 调用 sendCustomMessage()
+	// |
+	// ├─ ① 指定了 deliverAs: "nextTurn" 吗？
+	// |       |
+	// |       是 → 推入 _pendingNextTurnMessages 队列（挂起），等待下轮被消费（比如用户切换到“技术话题”时，挂起一条“主题已切换”，下次提问时AI能感知到。）
+	// |       否 → 往下走
+	// |
+	// ├─ ② 当前是否在流式输出中（isStreaming）？
+	// |       |
+	// |       是 → 直接发给正在流式输出的AI（作为 steer 或 followUp）消息以“追加问题”方式，排队等待当前流式结束后处理。默认以 steer 方式，排队等待当前流式结束后转向处理。
+	// |       否 → 往下走
+	// |
+	// ├─ ③ 是否要求触发新的一轮（triggerTurn: true）？
+	// |       |
+	// |       是 → 立刻作为新的一轮消息，启动AI处理（比如一条紧急的“用户取消了订单”通知，需要AI马上响应）
+	// |       否 → 往下走
+	// |
+	// └─ ④ 否则（普通状态，不流式，不触发新轮）（比如在后台记录“用户查看了帮助页面”，AI下次提问时能看到，但不用立即回复）
+	// 		 → 直接追加到当前会话状态，并持久化，但不触发AI
 	async sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
@@ -1391,6 +1494,8 @@ export class AgentSession {
 		} else if (options?.triggerTurn) {
 			await this._runAgentPrompt(appMessage);
 		} else {
+			// 这是静默插入模式。消息被记录到历史和状态中，但不触发AI。
+			// 典型场景：扩展想记录一条系统日志或通知，让后续对话能看到，但并不需要AI立刻回复。
 			this.agent.state.messages.push(appMessage);
 			this.sessionManager.appendCustomMessageEntry(
 				message.customType,
@@ -2558,23 +2663,30 @@ export class AgentSession {
 	/**
 	 * Prepare a retryable error for continuation with exponential backoff.
 	 * @returns true if the caller should continue the agent, false otherwise
+	 * 为一个可重试的错误做准备，以便让流程继续进行。意思是：这个方法不负责真正的重试执行，而是负责“把环境收拾好，让接下来能顺利重试”。
+	 * 使用指数退避策略
+	 * 返回值：如果调用者（外层循环）应该让代理继续（继续重试），则返回 true。
+	 * 否则（比如重试功能未开启、已达最大重试次数、等待被取消），返回 false，告知外层停止循环，结束任务。
 	 */
 	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
+		// 检查重试功能是否开启
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled) {
 			return false;
 		}
-
+		// 重试次数加1
 		this._retryAttempt++;
 
+		// 检查是否已达最大重试次数
 		if (this._retryAttempt > settings.maxRetries) {
+			// 保持 _retryAttempt 代表真正的重试次数
 			// Preserve the completed attempt count so post-run handling can emit the final failure.
 			this._retryAttempt--;
 			return false;
 		}
-
+		// 计算延迟时间
 		const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
-
+		// 发出重试开始事件，通知 UI 开始重试
 		this._emit({
 			type: "auto_retry_start",
 			attempt: this._retryAttempt,
@@ -2727,10 +2839,12 @@ export class AgentSession {
 	/**
 	 * Flush pending bash messages to agent state and session.
 	 * Called after agent turn completes to maintain proper message ordering.
+	 * 它把暂时存放在“缓冲区”里的一批消息，正式且有序地“写入”到两个核心存储位置（agent state and session），然后清空缓冲区
 	 */
 	private _flushPendingBashMessages(): void {
+		// 如果缓冲区为空，直接返回
 		if (this._pendingBashMessages.length === 0) return;
-
+		// 遍历缓冲区里的每条消息，逐条写入 agent state 和 session
 		for (const bashMessage of this._pendingBashMessages) {
 			// Add to agent state
 			this.agent.state.messages.push(bashMessage);
@@ -2739,6 +2853,7 @@ export class AgentSession {
 			this.sessionManager.appendMessage(bashMessage);
 		}
 
+		// 清空缓冲区
 		this._pendingBashMessages = [];
 	}
 

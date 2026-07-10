@@ -553,6 +553,7 @@ export class ExtensionRunner {
 		}
 	}
 
+	// 遍历所有扩展，检查是否有任何一个扩展监听了指定类型的事件
 	hasHandlers(eventType: string): boolean {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(eventType);
@@ -640,28 +641,17 @@ export class ExtensionRunner {
 		this.shutdownHandler();
 	}
 
-	/**
-	 * 创建一个 ExtensionContext，供事件处理器和工具执行使用
-	 * 上下文里的值在调用时才解析，因此通过 bindCore / bindUI 做的变更会反映到后续调用中
-	 * createContext() 不是把 session/agent 快照死，而是每次用时读当前绑定的 UI/mode
-	 * 后面 bindCore、bindUI 换了 session 或 UI，ctx 里拿到的仍是最新对象
-	 *  - 手柄：按 ctx.model 时，才去机器上读当前模型（getter）
-	 *  - 快照：启动时复印一张纸条「模型=GPT」，后面换了模型纸条还不变
-	 * 扩展需要碰 Pi 的能力，但不能随便 import AgentSession 乱改。Pi 通过 ctx 受控地给扩展：
-	 * ctx上有什么				干什么
-	 * ctx.ui 				弹窗、确认、通知
-	 * ctx.cwd 				当前项目目录
-	 * ctx.sessionManager 	读 session（只读）
-	 * ctx.model 			当前模型
-	 * ctx.abort() 			中止 agent
-	 * ctx.compact() 		触发压缩
-	 * ...
-	 * 一句话：扩展上下文 = 扩展能用的「手柄」，不是整个 Pi 源码
-	 */
+	// 创建扩展上下文（Extension Context）的工厂方法。它的核心设计是：返回一个完全由 getter 和函数组成的“代理对象”
+	// 每个属性访问或方法调用时，都会先检查系统是否处于激活状态，然后再动态获取当前的最新值。
+	// 核心设计模式：“懒加载 + 动态取值”
+	// 这个上下文对象不存储任何值，它只存储获取值的逻辑。每次访问属性时，都会重新执行一遍逻辑。
 	createContext(): ExtensionContext {
+		// 保存当前 ExtensionRunner 实例
 		const runner = this;
+		// 保存 getModel 方法引用
 		const getModel = this.getModel;
 		return {
+			// 所有属性都是 getter（访问时执行函数）
 			get ui() {
 				runner.assertActive();
 				return runner.uiContext;
@@ -690,6 +680,7 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return getModel();
 			},
+			// 所有方法都是普通函数
 			isIdle: () => {
 				runner.assertActive();
 				return runner.isIdleFn();
@@ -1027,28 +1018,56 @@ export class ExtensionRunner {
 		return currentPayload;
 	}
 
+	// 核心职责是：在AI正式处理之前，依次通知所有已注册的扩展，让它们有机会为即将开始的AI交互“添砖加瓦”
+	// 整体流程
+	// 输入参数：
+	// 	- prompt: 用户原始输入
+	// 	- images: 用户附带的图片
+	// 	- systemPrompt: 当前系统提示
+	// 	- systemPromptOptions: 构建系统提示的选项
+	
+	//  过程：
+	// 	① 初始化上下文（ctx）和结果收集器
+	// 	② 遍历所有扩展，执行其 "before_agent_start" 处理器
+	// 	③ 收集处理器返回的消息和系统提示修改
+	// 	④ 返回汇总结果
+	
+	//  返回值：
+	// 	- { messages?: CustomMessage[], systemPrompt?: string } 如果有任何修改
+	// 	- undefined 如果没有任何修改
 	async emitBeforeAgentStart(
 		prompt: string,
 		images: ImageContent[] | undefined,
 		systemPrompt: string,
 		systemPromptOptions: BuildSystemPromptOptions,
 	): Promise<BeforeAgentStartCombinedResult | undefined> {
+		// 一个“可修改”的系统提示。初始值是传入的 systemPrompt，后续每个扩展都可以修改它
 		let currentSystemPrompt = systemPrompt;
+
+		// 创建一个全新的、与原始对象完全隔离的“副本”，确保扩展在修改这个副本时，不会意外改动系统的内部状态
+		// 它相当于给扩展发了一台“只读/可写但完全独立的复印机”——扩展可以在这台复印机上随意涂改，但系统原稿永远保持干净
 		const ctx = Object.defineProperties(
+			// 创建一个空对象作为目标
 			{},
+			// 获取原始对象的所有属性描述符
 			Object.getOwnPropertyDescriptors(this.createContext()),
 		) as ExtensionContext;
+		// 定义一个 getSystemPrompt 方法，用于获取当前系统提示
 		ctx.getSystemPrompt = () => {
 			this.assertActive();
 			return currentSystemPrompt;
 		};
+		
+		// 一个数组，存放所有扩展注入的“额外消息”（比如通知、日志、上下文信息）
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
+		// 一个旗帜变量，标记“是否有人修改过系统提示”。如果没有任何扩展修改，最终返回时就不需要携带新的 systemPrompt
 		let systemPromptModified = false;
 
+		// 遍历所有扩展，执行其 "before_agent_start" 处理器，按顺序执行（顺序依赖）
+		// 扩展按照注册顺序依次、同步等待执行，因为后一个扩展可能依赖于前一个扩展的修改结果
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_agent_start");
 			if (!handlers || handlers.length === 0) continue;
-
 			for (const handler of handlers) {
 				try {
 					const event: BeforeAgentStartEvent = {

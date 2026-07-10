@@ -314,6 +314,7 @@ export class Agent {
 	}
 
 	/** Returns true when either queue still contains pending messages. */
+	// 返回 true：当两个队列中任一队列还有未处理的消息时
 	hasQueuedMessages(): boolean {
 		return this.steeringQueue.hasItems() || this.followUpQueue.hasItems();
 	}

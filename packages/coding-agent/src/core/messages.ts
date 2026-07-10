@@ -43,6 +43,7 @@ export interface BashExecutionMessage {
  * Message type for extension-injected messages via sendMessage().
  * These are custom messages that extensions can inject into the conversation.
  */
+// 自定义消息（CustomMessage）的数据结构，它是扩展（Extension）向对话中注入非标准消息的通用格式。
 export interface CustomMessage<T = unknown> {
 	role: "custom";
 	customType: string;

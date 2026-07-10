@@ -298,6 +298,7 @@ export interface CompactOptions {
  */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+// 扩展事件/工具 handler 里拿到的 受控手柄（ctx）。每次事件 createContext() 新建，getter 懒读，不是启动时快照
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -1059,9 +1060,12 @@ export interface MessageEndEventResult {
 	message?: AgentMessage;
 }
 
+// 它规定了扩展在处理 before_agent_start 事件时，可以返回什么样的结果。
 export interface BeforeAgentStartEventResult {
+	// 注入一条自定义消息。扩展可以从完整的 CustomMessage 接口中挑选（Pick）这四个字段来构造一个消息对象，用于给AI提供额外上下文或向用户显示通知
+	// 这种设计叫 “接口隔离”，让扩展只关心它需要提供的业务数据，而系统负责填充技术细节
 	message?: Pick<CustomMessage, "customType" | "content" | "display" | "details">;
-	/** Replace the system prompt for this turn. If multiple extensions return this, they are chained. */
+	// 替换或修改当前轮次的系统提示。如果多个扩展都返回了这个字段，它们的值会按顺序链式拼接（后一个扩展的 systemPrompt 会覆盖前一个修改后的结果）
 	systemPrompt?: string;
 }
 
