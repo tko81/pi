@@ -641,8 +641,22 @@ export class ExtensionRunner {
 	}
 
 	/**
-	 * Create an ExtensionContext for use in event handlers and tool execution.
-	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
+	 * 创建一个 ExtensionContext，供事件处理器和工具执行使用
+	 * 上下文里的值在调用时才解析，因此通过 bindCore / bindUI 做的变更会反映到后续调用中
+	 * createContext() 不是把 session/agent 快照死，而是每次用时读当前绑定的 UI/mode
+	 * 后面 bindCore、bindUI 换了 session 或 UI，ctx 里拿到的仍是最新对象
+	 *  - 手柄：按 ctx.model 时，才去机器上读当前模型（getter）
+	 *  - 快照：启动时复印一张纸条「模型=GPT」，后面换了模型纸条还不变
+	 * 扩展需要碰 Pi 的能力，但不能随便 import AgentSession 乱改。Pi 通过 ctx 受控地给扩展：
+	 * ctx上有什么				干什么
+	 * ctx.ui 				弹窗、确认、通知
+	 * ctx.cwd 				当前项目目录
+	 * ctx.sessionManager 	读 session（只读）
+	 * ctx.model 			当前模型
+	 * ctx.abort() 			中止 agent
+	 * ctx.compact() 		触发压缩
+	 * ...
+	 * 一句话：扩展上下文 = 扩展能用的「手柄」，不是整个 Pi 源码
 	 */
 	createContext(): ExtensionContext {
 		const runner = this;
@@ -1128,16 +1142,24 @@ export class ExtensionRunner {
 	}
 
 	/** Emit input event. Transforms chain, "handled" short-circuits. */
+	// 发送输入事件，转换链，"handled" 短路
+	// 用户输入 "hello"
+	//   → 扩展 A transform → "HELLO"
+	//   → 扩展 B 收到 "HELLO" transform → "HELLO world"
+	//   → 最终交给 prompt() 的是最后一次改完的 text/images
 	async emitInput(
 		text: string,
 		images: ImageContent[] | undefined,
 		source: InputSource,
 		streamingBehavior?: "steer" | "followUp",
 	): Promise<InputEventResult> {
+		// 创建扩展上下文
 		const ctx = this.createContext();
+		// 当前文本
 		let currentText = text;
+		// 当前图片
 		let currentImages = images;
-
+		// 遍历所有扩展，执行 input 事件处理器
 		for (const ext of this.extensions) {
 			for (const handler of ext.handlers.get("input") ?? []) {
 				try {

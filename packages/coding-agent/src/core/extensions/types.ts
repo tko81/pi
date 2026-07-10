@@ -794,7 +794,7 @@ export interface UserBashEvent {
 // Input Events
 // ============================================================================
 
-/** Source of user input */
+/** 用户输入源 */
 export type InputSource = "interactive" | "rpc" | "extension";
 
 /** Fired when user input is received, before agent processing */

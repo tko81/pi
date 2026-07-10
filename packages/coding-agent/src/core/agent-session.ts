@@ -199,17 +199,26 @@ export interface ExtensionBindings {
 	onError?: ExtensionErrorListener;
 }
 
-/** Options for AgentSession.prompt() */
+/** 发给 agent 的 prompt 选项 */
 export interface PromptOptions {
-	/** Whether to expand file-based prompt templates (default: true) */
+	/** 是否展开文件 based 模板（默认 true） */
 	expandPromptTemplates?: boolean;
-	/** Image attachments */
+	/** 图片附件 */
 	images?: ImageContent[];
-	/** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). Required if streaming. */
+	/** 流式处理时，如何排队消息："steer"（中断）或 "followUp"（等待）。流式处理时必须指定。 */
 	streamingBehavior?: "steer" | "followUp";
-	/** Source of input for extension input event handlers. Defaults to "interactive". */
+
+	/** 
+	 * 这条输入从哪来（默认 "interactive"）
+	 * - "interactive" → 用户 TUI 输入的
+	 * - "rpc" → RPC 调用
+	 * - "extension" → 扩展输入
+	*/
 	source?: InputSource;
-	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
+
+	// RPC 模式下用于观察 prompt 预检查接受或拒绝的内部钩子
+	// preflightResult接受一个函数，参数 success（true = 预检通过；false = 预检被拒）
+	// 告诉调用方「这条输入有没有被接受」，早于整轮 agent 跑完
 	preflightResult?: (success: boolean) => void;
 }
 
@@ -1015,34 +1024,47 @@ export class AgentSession {
 	}
 
 	/**
-	 * Send a prompt to the agent.
-	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming
-	 * - Expands file-based prompt templates by default
-	 * - During streaming, queues via steer() or followUp() based on streamingBehavior option
-	 * - Validates model and API key before sending (when not streaming)
-	 * @throws Error if streaming and no streamingBehavior specified
-	 * @throws Error if no model selected or no API key available (when not streaming)
+	 * 发给 agent 的 prompt
+	 * 1. 扩展命令立即执行（流式中也行）
+	 * 	- 输入以 / 开头 → 先 _tryExecuteExtensionCommand()。若是扩展注册的命令（pi.registerCommand）→ 当场执行
+	 * 	- 不进 LLM 轮次，直接 return。扩展可自己 pi.sendMessage() 调模型。
+	 * 2. 默认展开 prompt 模板，expandPromptTemplates 默认 true
+	 *  - /skill:name → _expandSkillCommand() 展开 skill 内容
+	 *  - /template → expandPromptTemplate() 读模板文件拼进正文
+	 * 关掉：prompt(text, { expandPromptTemplates: false })
+	 * 3. 流式进行中 → 必须排队
+	 *  - isStreaming === true 时不能立刻开新轮，要指定 streamingBehavior（steer() 或 followUp()）
+	 * 4. 非流式 → 先校验再发（有 model 和 API key）
+	 * @throws 如果流式处理时没有指定 streamingBehavior，则抛出错误
+	 * @throws 如果未选择模型或没有 API 密钥（在非流式处理时），则抛出错误
 	 */
+
+	// extension commands 和 extensions 注意区分，前者是/command 命令，后者是钩子函数
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		// 是否展开 prompt 模板
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
+		// 预检查结果回调
 		const preflightResult = options?.preflightResult;
+		// 消息数组
 		let messages: AgentMessage[] | undefined;
 
 		try {
 			// Handle extension commands first (execute immediately, even during streaming)
 			// Extension commands manage their own LLM interaction via pi.sendMessage()
 			if (expandPromptTemplates && text.startsWith("/")) {
+				// 尝试执行扩展命令
 				const handled = await this._tryExecuteExtensionCommand(text);
 				if (handled) {
-					// Extension command executed, no prompt to send
+					// 扩展命令执行了，没有 prompt 要发了
 					preflightResult?.(true);
 					return;
 				}
 			}
 
-			// Emit input event for extension interception (before skill/template expansion)
+			// prompt() 处理顺序里，这一步在「展开 skill/模板」之前，先让扩展有机会拦截或改写原始输入
 			let currentText = text;
 			let currentImages = options?.images;
+			// 如果有扩展输入事件（input event handler）处理器，先发 InputEvent 让扩展有机会拦截或改写原始输入
 			if (this._extensionRunner.hasHandlers("input")) {
 				const inputResult = await this._extensionRunner.emitInput(
 					currentText,
@@ -1060,14 +1082,15 @@ export class AgentSession {
 				}
 			}
 
-			// Expand skill commands (/skill:name args) and prompt templates (/template args)
+			// 展开 skill (/skill:name args) 命令和 prompt 模板 (/template args)
 			let expandedText = currentText;
 			if (expandPromptTemplates) {
 				expandedText = this._expandSkillCommand(expandedText);
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
 
-			// If streaming, queue via steer() or followUp() based on option
+			// 流式进行中 → 必须排队
+			//  - isStreaming === true 时不能立刻开新轮，要指定 streamingBehavior（steer() 或 followUp()）
 			if (this.isStreaming) {
 				if (!options?.streamingBehavior) {
 					throw new Error(
@@ -1083,17 +1106,24 @@ export class AgentSession {
 				return;
 			}
 
-			// Flush any pending bash messages before the new prompt
+			// 刷新任何挂起的 bash 消息，在新的 prompt 之前
+			// 用户跑 !command / executeBash 时，recordBashResult 会记一条 role: "bashExecution" 消息。
+			// 若当时 agent 正在流式（isStreaming === true），不能立刻 push 到 agent.state.messages——会破坏 tool_use / tool_result 顺序。
+			// 先放进 _pendingBashMessages 队列
 			this._flushPendingBashMessages();
 
-			// Validate model
+			// 校验模型
 			if (!this.model) {
 				throw new Error(formatNoModelSelectedMessage());
 			}
 
+			// 校验 API key
 			if (!this._modelRegistry.hasConfiguredAuth(this.model)) {
+				// 是否使用 OAuth
 				const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
+				// 使用 OAuth
 				if (isOAuth) {
+					// 认证失败
 					throw new Error(
 						`Authentication failed for "${this.model.provider}". ` +
 							`Credentials may have expired or network is unavailable. ` +
@@ -1173,25 +1203,29 @@ export class AgentSession {
 	}
 
 	/**
-	 * Try to execute an extension command. Returns true if command was found and executed.
+	 * 尝试执行扩展命令
+	 * true：命令存在且已处理（成功或失败都算）
+	 * false：没这命令 → 当普通输入继续（skill 模板、发 LLM）
 	 */
 	private async _tryExecuteExtensionCommand(text: string): Promise<boolean> {
-		// Parse command name and args
+		// 解析命令名和参数 command 命令只有一般都会有一个空格隔开命令和用户输入的参数
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
 
+		// 获取命令
 		const command = this._extensionRunner.getCommand(commandName);
+		// 命令不存在，返回 false
 		if (!command) return false;
 
-		// Get command context from extension runner (includes session control methods)
+		// 获取命令上下文（包括 session 控制方法）
 		const ctx = this._extensionRunner.createCommandContext();
-
+		// 执行命令
 		try {
 			await command.handler(args, ctx);
 			return true;
 		} catch (err) {
-			// Emit error via extension runner
+			// 抛出错误，通过 extension runner 发出错误事件
 			this._extensionRunner.emitError({
 				extensionPath: `command:${commandName}`,
 				event: "command",
