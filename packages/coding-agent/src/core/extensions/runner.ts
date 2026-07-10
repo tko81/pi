@@ -1063,8 +1063,7 @@ export class ExtensionRunner {
 		// 一个旗帜变量，标记“是否有人修改过系统提示”。如果没有任何扩展修改，最终返回时就不需要携带新的 systemPrompt
 		let systemPromptModified = false;
 
-		// 遍历所有扩展，执行其 "before_agent_start" 处理器，按顺序执行（顺序依赖）
-		// 扩展按照注册顺序依次、同步等待执行，因为后一个扩展可能依赖于前一个扩展的修改结果
+		// 遍历所有扩展，执行其 "before_agent_start" handlers，按顺序执行（顺序依赖）
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_agent_start");
 			if (!handlers || handlers.length === 0) continue;
@@ -1074,9 +1073,11 @@ export class ExtensionRunner {
 						type: "before_agent_start",
 						prompt,
 						images,
+						// 每个 handler 收到的 systemPrompt 都是当前最新的值（可能已被前序handler修改）
 						systemPrompt: currentSystemPrompt,
 						systemPromptOptions,
 					};
+					// 按照 handler 注册顺序依次、同步等待执行，因为后一个 handler 可能依赖于前一个 handler 的修改结果
 					const handlerResult = await handler(event, ctx);
 
 					if (handlerResult) {
@@ -1085,13 +1086,22 @@ export class ExtensionRunner {
 							messages.push(result.message);
 						}
 						if (result.systemPrompt !== undefined) {
+							// 覆盖模式给了后序 handler 一个强大的权力——它可以完全抛弃前序所有扩展的设定，重新定义AI的角色
+							// 这意味着前序 handler 的设定完全失效，后续 handler 的设定将成为最终的 AI 角色
+							// 但如果后续 handler 在原有基础上做了修改，那么最终的 AI 角色会是前序 handler 和后续 handler 的设定共同作用的结果
+							// 所以不一定前面的 systemPrompt 一定会失效，还要看 handler 内部具体的实现逻辑
+							// 可参考 pirate extension: packages/coding-agent/examples/extensions/pirate.ts
 							currentSystemPrompt = result.systemPrompt;
+							// flag 变量标记“有人修改过系统提示”
 							systemPromptModified = true;
 						}
 					}
 				} catch (err) {
+					// 如果 handler 执行过程中发生错误，则记录错误信息
 					const message = err instanceof Error ? err.message : String(err);
+					// 记录错误堆栈
 					const stack = err instanceof Error ? err.stack : undefined;
+					// 发出错误事件，通知系统发生了异常
 					this.emitError({
 						extensionPath: ext.path,
 						event: "before_agent_start",
@@ -1102,9 +1112,13 @@ export class ExtensionRunner {
 			}
 		}
 
+		// 如果有人修改过系统提示，或者有额外消息需要注入，则返回修改后的结果
 		if (messages.length > 0 || systemPromptModified) {
+			// 返回修改后的结果
 			return {
+				// 如果有额外消息需要注入，则返回额外消息
 				messages: messages.length > 0 ? messages : undefined,
+				// 如果有系统提示被修改，则返回修改后的系统提示
 				systemPrompt: systemPromptModified ? currentSystemPrompt : undefined,
 			};
 		}

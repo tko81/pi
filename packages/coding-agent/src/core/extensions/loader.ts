@@ -477,6 +477,9 @@ export async function loadExtensionFromFactory(
 
 /**
  * Load extensions from paths.
+ * 
+ * 这个函数负责从一系列路径中加载扩展。它支持缓存机制，可以根据需要选择是否使用缓存。
+ * 它还支持传递自定义的事件总线（EventBus）和扩展运行时（ExtensionRuntime），以便在加载扩展时使用。
  */
 async function loadExtensionsInternal(
 	paths: string[],
@@ -485,11 +488,17 @@ async function loadExtensionsInternal(
 	runtime?: ExtensionRuntime,
 	useCache = false,
 ): Promise<LoadExtensionsResult> {
+	// 存储加载成功的扩展对象
 	const extensions: Extension[] = [];
+	// 存储加载失败的扩展路径和错误信息
 	const errors: Array<{ path: string; error: string }> = [];
+	// 根据是否使用缓存，创建缓存令牌
 	const cacheToken = useCache ? useExtensionCacheCwd(cwd) : undefined;
+	// 解析工作目录
 	const resolvedCwd = cacheToken?.cwd ?? resolvePath(cwd);
+	// 解析事件总线
 	const resolvedEventBus = eventBus ?? createEventBus();
+	// 解析扩展运行时
 	const resolvedRuntime = runtime ?? createExtensionRuntime();
 
 	for (const extPath of paths) {
