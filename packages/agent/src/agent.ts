@@ -199,7 +199,7 @@ class PendingMessageQueue {
 type ActiveRun = {
 	promise: Promise<void>; // 当前轮运行的 Promise，resolve 时表示运行结束
 	resolve: () => void; // finishRun() 时手动通知“已空闲”
-	abortController: AbortController; // 给当前 agent loop 和监听器传播取消信号
+	abortController: AbortController; // 给当前 agent loop 和监听器传播取消信号，AbortController 是 Node.js 源码中的类，用于创建和管理取消信号
 };
 
 /**
@@ -639,18 +639,40 @@ export class Agent {
 	门开了
 	*/
 
+	// 把异常或取消转换成一套标准事件
+	// 整体的异常流程：
+	// runAgentLoop 抛出异常
+	//         ↓
+	// handleRunFailure()
+	//         ↓
+	// 生成失败消息
+	//         ↓
+	// 依次模拟完整的结束事件
+	//         ↓
+	// processEvents() 更新状态并通知监听器
+	//         ↓
+	// finishRun()
+	//         ↓
+	// Agent 回到 idle
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
 		const failureMessage = {
+			// 表示这是本次 Agent 响应的结果消息
 			role: "assistant",
+			// 失败时通常没有正常生成的文本，但消息结构仍然要求有 content，所以放入空文本
 			content: [{ type: "text", text: "" }],
+			// 记录发生错误时使用的模型信息，方便展示、日志记录和排查问题
 			api: this._state.model.api,
 			provider: this._state.model.provider,
 			model: this._state.model.id,
+			// 失败时没有可靠的 token 用量，因此使用项目定义的空用量对象
 			usage: EMPTY_USAGE,
+			// 记录停止原因：用户主动取消或执行过程中发生错误
 			stopReason: aborted ? "aborted" : "error",
+			// 记录错误的具体信息，方便排查问题
 			errorMessage: error instanceof Error ? error.message : String(error),
 			timestamp: Date.now(),
-		} satisfies AgentMessage;
+		} satisfies AgentMessage; // 检查这个对象属性是否符合或包含 AgentMessage，但不会把变量强制转换成宽泛的 AgentMessage 类型
+		// 模拟完整的失败事件流程
 		await this.processEvents({ type: "message_start", message: failureMessage });
 		await this.processEvents({ type: "message_end", message: failureMessage });
 		await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
@@ -672,28 +694,41 @@ export class Agent {
 	 * considered idle later, after all awaited listeners for `agent_end` finish
 	 * and `finishRun()` clears runtime-owned state.
 	 */
+	// 根据事件更新 Agent 内部状态
+	// 依次调用所有通过 subscribe() 注册的监听器
+	// 这里采用的是一种 reducer 风格：旧状态 + 事件 → 新状态
 	private async processEvents(event: AgentEvent): Promise<void> {
+		// processEvents() 的 switch 只负责“需要修改 Agent 内部状态”的事件，而不是要求覆盖全部事件
+		// 但所有事件都会通知监听器，因为它们都可能影响 UI 状态
 		switch (event.type) {
+			// 模型开始生成一条消息时，把它保存为当前流式消息。UI 可以根据它展示“正在生成”的回复
 			case "message_start":
 				this._state.streamingMessage = event.message;
 				break;
 
+			// 收到新的流式内容时，用最新消息替换之前的 streamingMessage
 			case "message_update":
 				this._state.streamingMessage = event.message;
 				break;
 
+			// 消息生成完成后：清除临时的流式消息，将最终消息加入正式历史记录
 			case "message_end":
 				this._state.streamingMessage = undefined;
 				this._state.messages.push(event.message);
 				break;
 
+			// 工具开始执行时，将工具调用 ID 加入待处理集合
 			case "tool_execution_start": {
+				// 更新 Set 时，不直接修改原来的对象，而是创建一个新 Set，修改新对象后再赋回状态
+				// this._state.pendingToolCalls.add(event.toolCallId); 这种写法中，Set 里的内容变了，但对象引用没有变
+				// 一些 UI 状态系统会通过引用是否改变来判断需不需要刷新，因为直接 .add() 后引用没变，UI 可能无法发现更新
 				const pendingToolCalls = new Set(this._state.pendingToolCalls);
 				pendingToolCalls.add(event.toolCallId);
 				this._state.pendingToolCalls = pendingToolCalls;
 				break;
 			}
 
+			// 工具执行结束后，将对应 ID 从待处理集合删除
 			case "tool_execution_end": {
 				const pendingToolCalls = new Set(this._state.pendingToolCalls);
 				pendingToolCalls.delete(event.toolCallId);
@@ -701,21 +736,25 @@ export class Agent {
 				break;
 			}
 
+			// 一个对话轮次结束时，如果 assistant 消息包含错误，就把错误保存到 Agent 状态
 			case "turn_end":
 				if (event.message.role === "assistant" && event.message.errorMessage) {
 					this._state.errorMessage = event.message.errorMessage;
 				}
 				break;
 
+			// 整个 Agent 循环结束，确保不再保留流式消息
 			case "agent_end":
 				this._state.streamingMessage = undefined;
 				break;
 		}
-
+		// 状态更新之后，方法会取得当前运行的取消信号
 		const signal = this.activeRun?.abortController.signal;
+		// 这是一个内部一致性检查。processEvents() 应该只在一次有效的 Agent 运行中调用，因为监听器需要收到当前运行对应的 AbortSignal
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}
+		// 串行按订阅顺序执行监听器
 		for (const listener of this.listeners) {
 			await listener(event, signal);
 		}
