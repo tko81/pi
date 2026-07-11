@@ -477,7 +477,12 @@ async function streamAssistantResponse(
 }
 
 /**
- * Execute tool calls from an assistant message.
+ * 工具调用执行策略的分发器
+ * 它本身不直接执行工具，而是：
+ * - 从 assistant 消息中找出所有工具调用
+ * - 判断这批工具应该串行还是并行执行
+ * - 转交给对应的执行函数
+ * - 返回整批工具调用的执行结果
  */
 async function executeToolCalls(
 	currentContext: AgentContext,
@@ -487,9 +492,16 @@ async function executeToolCalls(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
+	// 检查是否存在必须串行的工具
+	// some() 用来判断数组中是否至少有一个元素满足条件，只要找到一个必须串行的工具，就立即返回 true
 	const hasSequentialToolCall = toolCalls.some(
+		// 对于每个模型产生的工具调用 tc，在上下文工具列表中查找是否存在这个工具，找到工具后，检查它是否声明sequential
 		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
 	);
+	// 只要满足任意条件，整批工具就串行执行：
+	// - 全局配置要求串行
+	// - 当前批次至少一个工具自己要求串行
+	// 这是一个保守的执行策略，因为混合并发会产生不明确的顺序
 	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
 		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
 	}
@@ -509,10 +521,14 @@ async function executeToolCallsSequential(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
+	// 工具的完整执行结果，供最后判断是否终止
 	const finalizedCalls: FinalizedToolCallOutcome[] = [];
+	// 转换后的工具结果消息，交给 Agent 上层和下一轮 LLM
 	const messages: ToolResultMessage[] = [];
 
+	// 逐个处理工具
 	for (const toolCall of toolCalls) {
+		// 通知 Agent 和订阅者某个工具开始执行
 		await emit({
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
@@ -520,16 +536,29 @@ async function executeToolCallsSequential(
 			args: toolCall.arguments,
 		});
 
+		// 准备工具调用
+		// prepareToolCall 会返回两种结果：
+		// - immediate → 不需要真正执行工具，结果已经产生
+		// - prepared  → 准备完成，需要调用工具
 		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
 		let finalized: FinalizedToolCallOutcome;
+		// 立即结果
+		// 常见情况可能包括：
+		// - 找不到工具
+		// - 参数校验失败
+		// - 工具调用被钩子拒绝
+		// - 准备阶段直接返回预设结果
 		if (preparation.kind === "immediate") {
+			// 直接生成最终结果
 			finalized = {
 				toolCall,
 				result: preparation.result,
 				isError: preparation.isError,
 			};
 		} else {
+			// 调用真正的工具函数，获得原始执行结果
 			const executed = await executePreparedToolCall(preparation, signal, emit);
+			// 对原始结果做后处理，得到标准最终结果
 			finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -540,17 +569,24 @@ async function executeToolCallsSequential(
 			);
 		}
 
+		// 发送工具结束事件
 		await emitToolExecutionEnd(finalized, emit);
+		// 创建并发送工具结果消息
 		const toolResultMessage = createToolResultMessage(finalized);
 		await emitToolResultMessage(toolResultMessage, emit);
+
+		// 收集结果
 		finalizedCalls.push(finalized);
 		messages.push(toolResultMessage);
 
+		// 如果当前任务已经取消，就停止处理剩下的工具调用
+		// 这里是“当前工具收尾完成后再停止”，不会在生成结果消息之前直接退出
 		if (signal?.aborted) {
 			break;
 		}
 	}
 
+	// 根据所有已完成的工具结果判断是否应终止后续 Agent 循环
 	return {
 		messages,
 		terminate: shouldTerminateToolBatch(finalizedCalls),
@@ -650,6 +686,20 @@ type FinalizedToolCallOutcome = {
 
 type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
 
+// 一批已经完成的工具调用，是否要求 Agent 停止后续循环
+// 它只有在下面两个条件同时成立时才返回 true：
+// - 工具结果数组不为空
+// - 每一个工具结果的 terminate 都严格等于 true
+
+// 通常工具执行完成后，Agent 还要再调用一次 LLM，让模型读取工具结果并组织最终回答：
+// 这里工具没有设置 terminate: true，所以模型需要继续运行。
+// 但有些工具执行后，事情已经彻底完成，不需要模型再回复。例如：
+// - 工具已经直接向用户发送了最终内容；
+// - 工具完成了页面跳转或会话交接；
+// - 工具启动了外部流程，后续由外部系统接管；
+// - 工具明确表示当前 Agent 不应再生成回复；
+// - 特殊“结束会话”工具；
+// - 工具执行了终止性操作。
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
 }

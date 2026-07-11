@@ -20,54 +20,115 @@ import type {
 
 export { type AuthModel, ModelsError, type ModelsErrorCode } from "./auth/resolve.ts";
 
-/**
- * A provider is the concrete runtime unit. It owns id/name/base metadata,
- * auth methods, model listing, and stream behavior.
- *
- * `TApi` lets concrete provider factories declare which APIs their models
- * use (e.g. `openaiProvider(): Provider<"openai-responses" | "openai-completions">`),
- * giving typed model lists to direct factory users. Inside a `Models`
- * collection providers are held as `Provider<Api>`.
- */
-export interface Provider<TApi extends Api = Api> {
-	readonly id: string;
-	readonly name: string;
+/* 
+Provider 接口定义了一个“模型供应商运行时对象”必须具备哪些能力
+可以把 Provider 理解成某个模型平台的 adapter（适配器），例如：
+- OpenAI Provider
+- Anthropic Provider
+- Google Provider
+- Amazon Bedrock Provider
 
+它统一负责：
+- Provider 的身份信息
+- API 地址和请求头
+- 身份认证
+- 模型列表
+- 动态刷新模型
+- 调用模型并返回流式响应
+这样上层不需要分别了解 OpenAI、Anthropic 等平台的实现差异，只需要操作统一的 Provider 接口。 
+
+TApi 表示这个 Provider 支持哪些 API 协议
+例如 OpenAI Provider 可能同时支持:
+- "openai-responses"
+- "openai-completions"
+
+Anthropic Provider 可能是：
+- anthropic-messages
+
+TApi extends Api 表示 TApi 必须属于合法的 Api 类型
+在统一的 Models 集合内部，会将不同 Provider 都保存成：Provider<Api>
+因为一个集合里可能同时包含多种 API：
+- OpenAI Provider
+- Anthropic Provider
+- Google Provider
+具体工厂的直接使用者获得精确类型，而统一集合为了容纳所有 Provider，会使用较宽的公共类型 Api
+*/
+
+export interface Provider<TApi extends Api = Api> {
+	// readonly 表示创建 Provider 后，不能通过该接口重新赋值
+	// id 是程序内部使用的稳定标识
+	readonly id: string;
+	// name 是用于展示的名称
+	readonly name: string;
+	// Provider 的默认 API 地址，例如：
+	// baseUrl: "https://api.openai.com/v1"
+	// ? 表示可选，因为：
+	// - 有些 SDK 内置默认地址；
+	// - 有些 Provider 动态确定地址；
+	// - 有些认证或请求函数自行管理地址。
+	// 模型本身也可能有自己的 baseUrl，具体调用层可以按照项目规则决定优先级
 	readonly baseUrl?: string;
+	// Provider 默认附加的 HTTP 请求头
+	// 例如：
+	// headers: {
+	//   "X-App-Name": "Pi",
+	// }
+	// 它可能是普通对象，也可能支持动态计算，具体取决于 ProviderHeaders 的定义
 	readonly headers?: ProviderHeaders;
 
 	/**
-	 * Required: at least one of `apiKey`/`oauth`. Every provider has auth
-	 * semantics — even providers with only ambient credentials (env vars, AWS
-	 * profiles, ADC files) and keyless local servers provide `apiKey` auth
-	 * whose `resolve()` reports whether the provider is configured.
-	 * `Models.getAuth()` returns undefined when the provider is unconfigured.
+	* 这是 Provider 的认证能力，而且是必需字段。
+	* 注释要求每个 Provider 至少支持一种认证语义: apiKey 或 oauth
+	* 例如：
+	*  - OpenAI       → API Key
+	*  - 某些平台     → OAuth
+	*  - AWS Bedrock  → AWS Profile / 环境凭证
+	*  - Google       → ADC 文件
+	*  - 本地模型服务 → 可能不需要真实密钥
+	*  即使本地服务不需要 Key，仍然会通过 apiKey 类型的认证接口提供 resolve()，用来报告 Provider 当前是否可用
+	*  因此 auth 不只是“返回密码”，也承担了：检查这个 Provider 是否已经正确配置
 	 */
 	readonly auth: ProviderAuth;
 
-	/**
-	 * Current known models, sync. Static providers return their catalog;
-	 * dynamic providers return the list as of the last `refreshModels()`
-	 * (empty before the first). Must not throw; `Models` treats a throwing
-	 * implementation as having no models.
-	 */
+	// 同步返回当前已知的模型列表，readonly Model<TApi>[]表示调用者应该把它看作只读数组，不能随意修改 Provider 内部的模型目录
+	// 静态 Provider 在代码中已经拥有模型清单，因此可以立即返回
+	// getModels() {
+	//   return STATIC_MODELS;
+	// }
+	// 动态 Provider 需要从远程接口查询模型
+	// 注释还规定 getModels() 不应该抛异常。如果实现意外抛错，外层 Models 会将它当作没有模型
+	// 这让“读取当前缓存”保持简单可靠
 	getModels(): readonly Model<TApi>[];
 
-	/**
-	 * Dynamic providers only: fetch and update the model list. Side-effect-free
-	 * discovery (no loading/downloading); provider-specific model lifecycle
-	 * belongs in app commands. Concurrent calls share one in-flight fetch.
-	 * May reject (network); on rejection the model list stays at its last-known
-	 * state and a later call retries.
-	 */
+	// 这是可选方法，只有动态 Provider 才需要实现。
+	// 它负责：
+	// - 从远程获取模型列表
+	// - 更新 Provider 内部保存的模型目录
+	// - 完成后不直接返回模型，而是通过 getModels() 读取当前缓存的模型列表
 	refreshModels?(): Promise<void>;
 
+	// 这是强类型、API 专用的流式调用方法，T 必须是该厂商 Provider 支持的 API 之一
 	stream<T extends TApi>(
 		model: Model<T>,
 		context: Context,
+		// API 专用配置。它会根据具体 API 类型变化
+		// 例如不同 API 可能拥有不同的：
+		// - reasoning 参数
+		// - 缓存参数
+		// - Provider 专属请求字段
+		// - 兼容性选项
+		// 这就是为什么 stream() 需要泛型：模型的 api 类型会决定 options 允许哪些字段
 		options?: ApiStreamOptions<T>,
 	): AssistantMessageEventStream;
 
+	// 简化版调用接口。与 stream() 的区别主要在配置类型：
+	// stream()
+	// → ApiStreamOptions<T>
+	// → 根据具体 API 提供专用配置
+	
+	// streamSimple()
+	// → SimpleStreamOptions
+	// → 使用统一、跨 Provider 的简单配置
 	streamSimple(model: Model<TApi>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream;
 }
 

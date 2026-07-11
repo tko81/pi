@@ -5,6 +5,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import type { ImagesModel } from "../src/types.ts";
 
+// 它会从 OpenRouter API 获取支持图片输出的模型，把返回数据整理成项目自己的 ImagesModel 格式，最后生成 image-models.generated.ts 文件
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageRoot = join(__dirname, "..");

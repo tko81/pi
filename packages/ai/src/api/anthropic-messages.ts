@@ -180,64 +180,82 @@ function getAnthropicCompat(
 	};
 }
 
+// 它继承了通用的 StreamOptions，所以同时拥有 API Key、取消信号等通用选项，以及 Claude 特有的 thinking、工具选择和客户端注入选项
 export interface AnthropicOptions extends StreamOptions {
+
 	/**
-	 * Enable extended thinking.
-	 * For adaptive thinking models: the model decides when/how much to think.
-	 * For older models: uses budget-based thinking with thinkingBudgetTokens.
-	 * Default: undefined (thinking is omitted unless `streamSimple()` maps
-	 * a simple reasoning level to this option, or callers set it explicitly).
+	 * 项目通过两套字段兼容不同代际的模型
+	 * 旧模型：
+	 * - thinkingEnabled + thinkingBudgetTokens
+	 * 自适应模型：
+	 * - thinkingEnabled + effort
+	 */
+
+	 /** 
+	 * 控制是否启用 Claude 的扩展思考能力
+	 * 启用 thinking；不传时，默认不会主动把 thinking 配置发给 Anthropic，除非 streamSimple() 根据统一的 reasoning 配置自动转换。
+	 * 它对两类模型有不同作用：
+	 * - 自适应思考模型：模型自己决定是否思考以及思考多少。
+	 * - 较老模型：结合 thinkingBudgetTokens 限制思考 token 数量。
 	 */
 	thinkingEnabled?: boolean;
 	/**
-	 * Token budget for extended thinking (older models only).
-	 * Ignored for adaptive thinking models.
-	 * Default: 1024 when `thinkingEnabled` is true and no budget is provided.
+	 * 给较老的、基于预算的 thinking 模型设置思考 token 上限
+	 * 表示最多为扩展思考分配 4096 个 token
+	 * 如果 thinkingEnabled 为 true，但没有提供 thinkingBudgetTokens，则默认使用 1024 个 token
+	 * 对于自适应思考模型，这个字段会被忽略，因为它们使用 effort，而不是固定 token 预算
 	 */
 	thinkingBudgetTokens?: number;
 	/**
-	 * Effort level for adaptive thinking models.
-	 * Controls how much thinking Claude allocates:
-	 * - "max": Always thinks with no constraints (Opus 4.6 only)
-	 * - "xhigh": Highest reasoning level (Opus 4.7+, Fable 5)
-	 * - "high": Always thinks, deep reasoning
-	 * - "medium": Moderate thinking, may skip for simple queries
-	 * - "low": Minimal thinking, skips for simple tasks
-	 * Ignored for older models.
-	 * Default: omitted unless `streamSimple()` maps a simple reasoning
-	 * level to this option.
+	 * 控制自适应思考模型投入多少推理强度
+	 * 值	含义
+	 * - "low"	最少推理，简单任务可能不思考
+	 * - "medium"	中等推理，简单任务可能跳过
+	 * - "high"	深度推理，通常会进行思考
+	 * - "xhigh"	更高推理强度，仅部分模型支持
+	 * - "max"	最大推理强度，仅特定模型支持
+	 * effort 只对支持自适应 thinking 的模型有效，旧模型会忽略它
 	 */
 	effort?: AnthropicEffort;
 	/**
-	 * Controls how thinking content is returned in API responses.
-	 * - "summarized": Thinking blocks contain summarized thinking text.
-	 * - "omitted": Thinking blocks return an empty thinking field; the encrypted
-	 *   signature still travels back for multi-turn continuity. Use for faster
-	 *   time-to-first-text-token when your UI does not surface thinking.
-	 *
-	 * Note: Anthropic's API default for Claude Opus 4.7 and Claude Mythos Preview
-	 * is "omitted". We default to "summarized" here to keep behavior consistent
-	 * with older Claude 4 models. Set this explicitly to "omitted" to opt in.
-	 * Default: "summarized" when thinking is enabled.
+	 * 控制 API 响应中如何返回 thinking 内容
+	 * "summarized"：API 返回经过总结的思考文本，应用可以显示 thinking 内容
+	 * "omitted"：thinking 块仍然存在，但文本字段为空。用于不展示思考内容的 UI，可以缩短首个正常文本 token 的等待时间。
+	 * 即使文本被省略，加密签名仍然会返回并保存在消息中，以便多轮对话保持 thinking 连续性。Anthropic 不会把 Claude 的
+	 * 思考文本返回给程序，但仍会返回一个不可读的加密签名，用来证明和标识本次思考状态。可以粗略理解为响应中有这样的 thinking block：
+		{
+		type: "thinking",
+		thinking: "",                 // 思考文本被省略
+		signature: "加密后的签名数据"  // 仍然保留
+		}
+	 * 这里的 signature 不是给人阅读的思考内容，也不能从中还原 Claude 的完整推理。它是 Anthropic API 使用的受保护数据。
+	 * thinking signature 的核心作用是：让 Anthropic 验证某个 thinking block 确实是 Claude 在之前响应中生成的，并
+	 * 允许该思考上下文在后续请求，特别是工具调用循环中被安全地原样带回。可以把它理解为 Claude 思考块的“防篡改凭证”
+	 * 
+	 * 默认值："summarized"，与旧模型保持一致（这是项目自己选择的兼容性默认值，不一定等于某些 Anthropic 模型 API 的默认值）
 	 */
 	thinkingDisplay?: AnthropicThinkingDisplay;
 	/**
-	 * Whether to request the interleaved thinking beta header for non-adaptive
-	 * thinking models. Adaptive thinking models have interleaved thinking built in,
-	 * so the header is skipped for them regardless of this setting.
-	 * Default: true.
+	 * 控制是否为非自适应模型启用“交错思考”。普通工具循环可能是：
+	 * 集中思考
+	 * → 调用工具
+	 * → 读取工具结果
+	 * → 输出回答
+	 * 交错思考允许模型在工具调用之间继续思考
+	 * 默认值：true，对于自适应 thinking 模型，这种能力已经内置，因此无论该选项是什么，都不需要发送对应的 beta header
+	 * Pi Agent 的 ReAct 循环提供“工具调用之间再次请求模型”的结构
+	 * Anthropic 的 interleaved thinking 允许 Claude 在这个结构里的后续轮次继续使用扩展思考
 	 */
 	interleavedThinking?: boolean;
 	/**
-	 * Anthropic tool choice behavior. String values map to Anthropic's built-in
-	 * choices; `{ type: "tool", name }` forces a specific tool.
-	 * Default: omitted (Anthropic default behavior, currently equivalent to auto).
+	 * 控制 Claude 如何使用工具
+	 * "auto"：模型自己决定是否调用工具
+	 * "any"：强制使用工具，但具体使用哪个由模型决定
+	 * "none"：不调用工具
 	 */
 	toolChoice?: "auto" | "any" | "none" | { type: "tool"; name: string };
 	/**
-	 * Pre-built Anthropic client instance. When provided, skips internal client
-	 * construction entirely. Use this to inject alternative SDK clients such as
-	 * `AnthropicVertex` that shares the same messaging API.
+	 * 允许调用者直接传入一个已经创建好的 Anthropic SDK 客户端，提供后，项目会跳过内部客户端创建，直接使用这个实例
 	 */
 	client?: Anthropic;
 }
@@ -465,14 +483,42 @@ async function* iterateAnthropicEvents(
 	}
 }
 
+/* 
+这段 stream() 是 Anthropic Messages API 的流式适配器。它负责：
+项目统一的 Model + Context
+        ↓
+转换并调用 Anthropic API
+        ↓
+接收 Anthropic 原始流事件
+        ↓
+逐步拼接 AssistantMessage
+        ↓
+转换成项目统一的 AssistantMessageEvent
+        ↓
+通过 AssistantMessageEventStream 返回
+最关键的理解是：函数会立即返回一个事件流，真正的网络请求和消息拼接在后台异步执行。
+它只接受使用 Anthropic Messages 协议的模型：model: Model<"anthropic-messages"> 
+
+用 const 而非用 function 定义 stream(): TypeScript 会强制检查右边的函数是否完全符合 StreamFunction 这个接口
+如果参数或返回值类型不匹配，立即报错。这起到“类型守卫”的作用
+*/
 export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	model: Model<"anthropic-messages">,
 	context: Context,
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
+	// 为什么里面有一个异步立即执行函数?
+	// stream() 本身不是 async，所以它不会等 Anthropic 响应完成才返回
+	// 执行顺序是：
+	// 1. 创建 stream
+    // 2. 启动异步后台任务
+	// 3. 立即 return stream
+	// 4. 后台陆续 stream.push(event)
+	// 5. 调用者通过 for await 消费
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
+		// 先创建一个空的 AssistantMessage，后续收到流式数据时，持续修改这个 output
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
