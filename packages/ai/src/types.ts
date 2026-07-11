@@ -145,8 +145,8 @@ export interface StreamOptions {
 	/**
 	 * Optional callback invoked after an HTTP response is received and before
 	 * its body stream is consumed.
-	 * 响应接收回调。在 HTTP 响应被接收、但响应流被消费之前调用。
-	 * 可以用于检查响应头、状态码或进行非侵入式的日志记录。
+	 * 响应接收回调，在 HTTP 响应被接收、但响应流被消费之前调用
+	 * 可以用于检查响应头、状态码或进行非侵入式的日志记录
 	 */
 	onResponse?: (response: ProviderResponse, model: Model<Api>) => void | Promise<void>;
 	/**

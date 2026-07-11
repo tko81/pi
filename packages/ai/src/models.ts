@@ -443,6 +443,10 @@ export function hasApi<TApi extends Api>(model: Model<Api>, api: TApi): model is
 	return model.api === api;
 }
 
+/* 
+根据模型单价和本次 token 用量，计算一次请求的费用，并写入：usage.cost
+整体公式是：费用 = 每百万 token 单价 × token 数量 ÷ 1,000,000 
+*/
 export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
 	// Anthropic charges 2x base input for 1h cache writes.
 	const longWrite = usage.cacheWrite1h ?? 0;

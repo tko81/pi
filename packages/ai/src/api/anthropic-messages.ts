@@ -279,6 +279,8 @@ function hasHeader(headers: ProviderHeaders | undefined, name: string): boolean 
 	return false;
 }
 
+// 这里不仅检查 apiKey，还会考虑调用者提供的 headers，因为某些兼容服务可能把鉴权信息直接放在 header 中
+// 如果既没有 API Key，也没有可接受的 header 鉴权，这里会抛出错误，避免创建一个注定不能调用 API 的 Client
 function assertRequestAuth(provider: string, apiKey: string | undefined, headers: ProviderHeaders | undefined): void {
 	if (apiKey) return;
 	if (
@@ -292,8 +294,11 @@ function assertRequestAuth(provider: string, apiKey: string | undefined, headers
 }
 
 interface ServerSentEvent {
+	// 这是什么事件
 	event: string | null;
+	// 事件携带了什么内容
 	data: string;
+	// 服务端原本究竟发送了什么
 	raw: string[];
 }
 
@@ -313,34 +318,64 @@ const ANTHROPIC_MESSAGE_EVENTS: ReadonlySet<string> = new Set([
 ]);
 
 function flushSseEvent(state: SseDecoderState): ServerSentEvent | null {
+	// 如果当前事件没有名称，也没有 data 行，说明这是一个空事件，直接返回 null
 	if (!state.event && state.data.length === 0) {
 		return null;
 	}
 
+	// 否则，创建一个完整的 ServerSentEvent 对象，包含 event、data 和 raw 数据
 	const event: ServerSentEvent = {
 		event: state.event,
 		data: state.data.join("\n"),
 		raw: [...state.raw],
 	};
+	// 清空状态，准备解析下一个事件
 	state.event = null;
 	state.data = [];
 	state.raw = [];
 	return event;
 }
 
+/* 
+这个函数负责解析一行 SSE 文本，并把解析结果累积到 state 中
+它不会每读取一行都返回事件。只有遇到空行，表示当前 SSE 事件结束时，才返回一个完整的 ServerSentEvent
+SSE 使用空行分隔事件：
+event: message_start
+data: {"id":"msg-1"}
+
+event: message_stop
+data: {}
+第一组 event 和 data 后面的空行，表示第一条事件结束 
+*/
 function decodeSseLine(line: string, state: SseDecoderState): ServerSentEvent | null {
+	// 空行表示事件结束，用当前 state 创建完整事件
 	if (line === "") {
 		return flushSseEvent(state);
 	}
-
+	// 只要不是分隔事件的空行，就把当前行保存到 raw
 	state.raw.push(line);
+	/* 
+	忽略 SSE 注释行
+	SSE 中以冒号开头的行是注释：
+	: ping
+	: keep-alive
+	服务端常用这种行维持连接。
+	它不会成为业务事件的 event 或 data，所以直接返回 null
+	不过，因为 state.raw.push(line) 发生在前面，注释行仍然会保存在 raw 中
+	*/
 	if (line.startsWith(":")) {
 		return null;
 	}
 
+	// 寻找字段名与值的分隔符
+	// SSE 行通常是：字段名: 字段值。为什么只找第一个？因为值里面也可能有冒号
+	// 如果没有冒号：根据 SSE 规则，整行就是字段名
 	const delimiterIndex = line.indexOf(":");
+	// 提取字段名
 	const fieldName = delimiterIndex === -1 ? line : line.slice(0, delimiterIndex);
+	// 提取字段值
 	let value = delimiterIndex === -1 ? "" : line.slice(delimiterIndex + 1);
+	// 如果值以空格开头，去掉空格
 	if (value.startsWith(" ")) {
 		value = value.slice(1);
 	}
@@ -383,39 +418,70 @@ function consumeLine(text: string): { line: string; rest: string } | null {
 	};
 }
 
+// 从 HTTP 的 response.body 字节流中持续读取字节流，再通过 utf-8 解码器解码成文本
+// 将 SSE 文本协议解析成一个个 ServerSentEvent，再通过 yield 交给调用者
 async function* iterateSseMessages(
 	body: ReadableStream<Uint8Array>,
 	signal?: AbortSignal,
 ): AsyncGenerator<ServerSentEvent> {
+	// 获取字节流读取器
 	const reader = body.getReader();
+	// 创建文本解码器，默认使用 UTF-8 编码
 	const decoder = new TextDecoder();
+	// 初始化 SSE 解析状态，一个 SSE 事件可能由多行组成，因此不能看到一行就立即生成完整事件，需要暂存：
+	// - event：当前 SSE 事件名称
+	// - data：当前事件的所有 data: 行
+	// - raw：当前事件未经处理的原始行
+	// 空行表示一个 SSE 事件结束
 	const state: SseDecoderState = { event: null, data: [], raw: [] };
+	// 初始化缓冲区，网络数据块的边界不等于文本行的边界
+	// 例如服务端发送：
+	// data: {"text":"你好"}\n\n
+	// 实际读取时可能被拆成：
+	// - chunk1: data: {"tex
+	// - chunk2: t":"你
+	// - chunk3: 好"}\n\n
+	// 因此每次解码后的文本必须先追加到 buffer：
+	// buffer += decodedText;
+	// 只有发现完整换行后才能解析
 	let buffer = "";
 
 	try {
+		// 持续从 body 读取字节流，直到流结束、取消或发生错误
 		while (true) {
+			// 如果调用者已经取消请求，就抛出异常，停止解析
 			if (signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
-
+			// 等待下一段网络数据，如果暂时没有数据，当前异步生成器会停在这里
 			const { value, done } = await reader.read();
 			if (done) {
 				break;
 			}
 
+			// stream: true 非常重要，表示：后面还有更多字节，本次末尾如果遇到不完整的 UTF-8 字符，先不要生成错误字符，等待下一个数据块补全
+			// 流式 TextDecoder 会把前两个字节暂存在内部，等第三个字节到达后再正确生成汉字
 			buffer += decoder.decode(value, { stream: true });
+			// 从 buffer 中逐行解析，consumeLine() 尝试从 buffer 取出一整行，如果当前 buffer 还没有完整换行，则返回 null
 			let consumed = consumeLine(buffer);
+			// 循环接着处理所有完整行
 			while (consumed) {
+				// 更新剩余缓冲区，已经取出的行从 buffer 中移除，只保留还没处理的部分
 				buffer = consumed.rest;
+				// 解析当前行，大多数普通行只更新 state，返回 null。只有读到事件分隔空行时，才会得到完整的 ServerSentEvent
 				const event = decodeSseLine(consumed.line, state);
+				// yield 会把事件交给外面的 for await，并暂时暂停生成器。调用者处理完并请求下一项后，生成器继续运行
 				if (event) {
 					yield event;
 				}
+				// 继续尝试取下一行
 				consumed = consumeLine(buffer);
 			}
 		}
 
+		// 网络流结束后的 Decoder 收尾，不带参数调用表示输入已经结束，把内部剩余字节全部输出并完成解码
 		buffer += decoder.decode();
+		// 处理收尾后的完整行，这是对剩余 buffer 再做一次正常逐行处理
 		let consumed = consumeLine(buffer);
 		while (consumed) {
 			buffer = consumed.rest;
@@ -425,14 +491,15 @@ async function* iterateSseMessages(
 			}
 			consumed = consumeLine(buffer);
 		}
-
+		// 处理没有换行的最后一行，服务端最后一行可能没有以 \n 结束
+		// 这种情况下 consumeLine() 无法取出它，所以这里手动把剩余 buffer 作为最后一行解析
 		if (buffer.length > 0) {
 			const event = decodeSseLine(buffer, state);
 			if (event) {
 				yield event;
 			}
 		}
-
+		// 强制提交最后一个 SSE 事件
 		const trailingEvent = flushSseEvent(state);
 		if (trailingEvent) {
 			yield trailingEvent;
@@ -442,35 +509,66 @@ async function* iterateSseMessages(
 	}
 }
 
+/* 
+这个函数是在上一层 iterateSseMessages() 之上，再做一层 Anthropic 协议解析。
+上一层输出的是通用 SSE：
+ServerSentEvent {
+  event: string | null;
+  data: string;
+  raw: string[];
+}
+当前函数把它转换成 Anthropic SDK 定义的事件对象：RawMessageStreamEvent 
+
+HTTP Response.body
+        ↓
+iterateSseMessages()
+        ↓
+通用 SSE { event, data, raw }
+        ↓
+过滤 Anthropic 消息事件
+        ↓
+JSON 解析
+        ↓
+RawMessageStreamEvent
+        ↓
+yield 给上层处理
+*/
 async function* iterateAnthropicEvents(
 	response: Response,
 	signal?: AbortSignal,
 ): AsyncGenerator<RawMessageStreamEvent> {
+	// 检查响应体流式响应必须有：response.body，如果没有响应体，就无法读取 SSE 数据，因此立即报错
 	if (!response.body) {
 		throw new Error("Attempted to iterate over an Anthropic response with no body");
 	}
 
+	// 记录是否收到开始和结束事件，用来检查 Anthropic 响应是否完整
 	let sawMessageStart = false;
 	let sawMessageEnd = false;
 
+	// 遍历底层 SSE
 	for await (const sse of iterateSseMessages(response.body, signal)) {
 		if (sse.event === "error") {
 			throw new Error(sse.data);
 		}
-
+		// 过滤掉非 Anthropic 消息事件
 		if (!ANTHROPIC_MESSAGE_EVENTS.has(sse.event ?? "")) {
 			continue;
 		}
 
 		try {
+			// 解析 JSON
 			const event = parseJsonWithRepair<RawMessageStreamEvent>(sse.data);
+			// 更新完整性标记
 			if (event.type === "message_start") {
 				sawMessageStart = true;
 			} else if (event.type === "message_stop") {
 				sawMessageEnd = true;
 			}
+			// 向上层产出事件
 			yield event;
 		} catch (error) {
+			// 解析失败，抛出错误，包含原始事件数据，方便调试
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(
 				`Could not parse Anthropic SSE event ${sse.event}: ${message}; data=${sse.data}; raw=${sse.raw.join("\\n")}`,
@@ -478,6 +576,7 @@ async function* iterateAnthropicEvents(
 		}
 	}
 
+	// 检查响应是否完整，必须有开始和结束事件
 	if (sawMessageStart && !sawMessageEnd) {
 		throw new Error("Anthropic stream ended before message_stop");
 	}
@@ -507,16 +606,29 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	context: Context,
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
-	// 为什么里面有一个异步立即执行函数?
-	// stream() 本身不是 async，所以它不会等 Anthropic 响应完成才返回
-	// 执行顺序是：
-	// 1. 创建 stream
-    // 2. 启动异步后台任务
-	// 3. 立即 return stream
-	// 4. 后台陆续 stream.push(event)
-	// 5. 调用者通过 for await 消费
+	/* 
+	为什么里面有一个异步立即执行函数?
+	stream() 本身不是 async，所以它不会等 Anthropic 响应完成才返回
+	执行顺序是：
+	1. 创建 stream
+    2. 启动异步后台任务
+	3. 立即 return stream 
+	4. 后台陆续 stream.push(event)
+	5. 调用者通过 for await 消费
+	调用者因此可以马上拿到事件流
+	const response = stream(model, context, options);
+	for await (const event of response) {
+	  // 边生成边处理
+	}
+	如果这里直接 await 完整请求再返回，就失去了流式输出的意义。 
+	*/
 	const stream = new AssistantMessageEventStream();
 
+	/* 
+	立即执行函数表达式（IIFE），结合了箭头函数和异步特性
+	- async () => { ... }	定义一个异步箭头函数
+	- 后面的()	立即调用这个函数（IIFE 的执行括号）
+	 */
 	(async () => {
 		// 先创建一个空的 AssistantMessage，后续收到流式数据时，持续修改这个 output
 		const output: AssistantMessage = {
@@ -536,30 +648,53 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
-
+		// 这个异步立即执行函数没有被外层 await，所以内部必须自己用 try/catch 处理错误，否则容易产生未处理的 Promise rejection
 		try {
+			// 创建或使用 Anthropic Client
 			let client: Anthropic;
 			let isOAuth: boolean;
 
+			// 如果调用者提供了 Client 选项，直接使用它
 			if (options?.client) {
 				client = options.client;
 				isOAuth = false;
 			} else {
+				// 由适配器创建 Client
 				const apiKey = options?.apiKey;
+				// 检查请求有没有可用的鉴权信息
 				assertRequestAuth(model.provider, apiKey, options?.headers);
 
+				// 准备 GitHub Copilot 动态请求头，只有当前模型通过 GitHub Copilot provider 调用时才会用到
 				let copilotDynamicHeaders: Record<string, string> | undefined;
+				// GitHub Copilot 是模型访问渠道，Anthropic Messages 是调用协议
+				// 项目复用了 Anthropic SDK 和 Messages API 格式，通过 GitHub Copilot 的服务地址去调用 Copilot 提供的 Claude 模型
+				// 它并不是直接请求 Anthropic 官方 API
+				// Pi 项目
+				// ↓ 使用 Anthropic SDK / Messages 协议
+				// GitHub Copilot 服务端
+				// ↓ 转发或提供
+				// Claude 模型
 				if (model.provider === "github-copilot") {
+					// 检查消息中有没有图片
 					const hasImages = hasCopilotVisionInput(context.messages);
+					// 准备 GitHub Copilot 动态请求头
 					copilotDynamicHeaders = buildCopilotDynamicHeaders({
 						messages: context.messages,
 						hasImages,
 					});
 				}
 
+				// 解析缓存策略，它决定当前请求使用哪种缓存保留策略：
+				// "none"  → 不使用缓存
+				// "short" → 短期缓存
+				// "long"  → 长期缓存
 				const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
-				const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 
+				// 决定是否传递 sessionId，如果明确禁用缓存，就不传 session ID
+				// 这个 session ID 后续可能被转换为：x-session-affinity: <sessionId>
+				// 作用是让兼容 Provider 尽量把同一会话路由到相同后端，提高缓存命中或会话亲和性
+				const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
+				// 调用 Anthropic SDK 创建 Client
 				const created = createClient(
 					model,
 					apiKey,
@@ -572,25 +707,60 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
+			// 构造请求参数
+			// 把项目统一的 Context 转成 Anthropic Messages API 所需格式，例如：
+			// context.systemPrompt → system
+			// context.messages     → messages
+			// context.tools        → tools
+			// reasoning 配置       → thinking
 			let params = buildParams(model, context, isOAuth, options);
+			// 然后提供一个请求修改钩子：调用者可以在请求发送前检查或修改最终 payload
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as MessageCreateParamsStreaming;
 			}
+			// 请求支持：
+			// - AbortSignal 取消
+			// - 超时
+			// - 自动重试次数
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: options?.maxRetries ?? 0,
 			};
+			// 发起流式请求并等待服务端返回响应状态和 headers，由于是流式请求，所以不会等待响应体完成
+			// 这行代码发送一个流式请求，并等待服务端建立 SSE 响应连接
 			const response = await client.messages.create({ ...params, stream: true }, requestOptions).asResponse();
+			// 调用响应接收回调，可以用于检查响应头、状态码或进行非侵入式的日志记录
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+			// 推送开始事件，表示流式响应正式开始，这不是 Anthropic 原始事件，而是项目统一的 AssistantMessageEvent
 			stream.push({ type: "start", partial: output });
-
-			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
+			// 定义“流式解析期间使用的临时内容块类型”
+			// 第一部分：三选一，| 是联合类型，表示一个 Block 首先可能是三种内容之一
+			// 其中工具调用的参数在流式过程中不是一次性返回，可能逐段到达，所以需要一个临时的 partialJson 字段来暂存
+			// 第二部分：每种内容块都必须有 index，一条 assistant 消息可能同时包含多个块，之后收到增量事件时，可以通过索引找到要更新的内容块
+			type Block = (
+				| ThinkingContent
+				| TextContent
+				| (ToolCall & { partialJson: string })
+			)
+			& { index: number };
+			// 在当前流式解析阶段，请把 output.content 看作 Block[]
+			// 正式消息内容中没有流式解析需要的 2 个临时字段，但是当前函数在生成过程中会暂时加入这些字段，所以需要更适合内部处理的 Block[] 类型
+			// 当做 Block[] 类型后就可以合法访问 2 个临时字段
 			const blocks = output.content as Block[];
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
+				// 处理消息开始事件
 				if (event.type === "message_start") {
+					/* 
+					记录：
+					- Anthropic 响应 ID；
+					- 输入、输出 token；
+					- 缓存读取和写入 token；
+					- 总 token；
+					- 费用
+					*/
 					output.responseId = event.message.id;
 					// Capture initial token usage from message_start event
 					// This ensures we have input token counts even if the stream is aborted early
@@ -603,7 +773,9 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					calculateCost(model, output.usage);
-				} else if (event.type === "content_block_start") {
+				} 
+				// 表示一个新内容块开始，创建各种类型的空内容块：文本、思考、工具调用等
+				else if (event.type === "content_block_start") {
 					if (event.content_block.type === "text") {
 						const block: Block = {
 							type: "text",
@@ -622,6 +794,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						output.content.push(block);
 						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "redacted_thinking") {
+						// Anthropic 不提供实际推理文本时，项目仍保存一个占位块和签名
 						const block: Block = {
 							type: "thinking",
 							thinking: "[Reasoning redacted]",
@@ -645,7 +818,9 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						output.content.push(block);
 						stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 					}
-				} else if (event.type === "content_block_delta") {
+				} 
+				// 这是实际拼接内容的地方
+				else if (event.type === "content_block_delta") {
 					if (event.delta.type === "text_delta") {
 						const index = blocks.findIndex((b) => b.index === event.index);
 						const block = blocks[index];
@@ -691,10 +866,13 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							block.thinkingSignature += event.delta.signature;
 						}
 					}
-				} else if (event.type === "content_block_stop") {
+				} 
+				// 表示某一个内容块已经完成
+				else if (event.type === "content_block_stop") {
 					const index = blocks.findIndex((b) => b.index === event.index);
 					const block = blocks[index];
 					if (block) {
+						// 删除临时的索引
 						delete (block as any).index;
 						if (block.type === "text") {
 							stream.push({
@@ -712,8 +890,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							});
 						} else if (block.type === "toolCall") {
 							block.arguments = parseStreamingJson(block.partialJson);
-							// Finalize in-place and strip the scratch buffer so replay only
-							// carries parsed arguments.
+							// 删除拼接用的 partialJson
 							delete (block as { partialJson?: string }).partialJson;
 							stream.push({
 								type: "toolcall_end",
@@ -723,16 +900,19 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							});
 						}
 					}
-				} else if (event.type === "message_delta") {
+				} 
+				// 这个事件主要更新整条消息的最终状态
+				else if (event.type === "message_delta") {
+					// 停止原因
 					if (event.delta.stop_reason) {
+						// 将 Anthropic 的停止原因转换成项目统一类型
 						const stopReasonResult = mapStopReason(event.delta.stop_reason, event.delta.stop_details);
 						output.stopReason = stopReasonResult.stopReason;
 						if (stopReasonResult.errorMessage) {
 							output.errorMessage = stopReasonResult.errorMessage;
 						}
 					}
-					// Only update usage fields if present (not null).
-					// Preserves input_tokens from message_start when proxies omit it in message_delta.
+					// Token 和成本的更新
 					if (event.usage.input_tokens != null) {
 						output.usage.input = event.usage.input_tokens;
 					}
@@ -745,21 +925,26 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					if (event.usage.cache_creation_input_tokens != null) {
 						output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
 					}
-					// Anthropic reports reasoning tokens in `output_tokens_details.thinking_tokens` on the
-					// final message_delta usage (a subset of output_tokens). SDK 0.91.1 omits the field from
-					// its Usage type, so read it through a narrow cast. Verified against the live API.
+					/* 
+					Anthropic（Claude 模型的 API 提供商）会在 最后一条 message_delta 的 usage 字段中
+					通过 output_tokens_details.thinking_tokens 返回“思考令牌”的数量，thinking_tokens
+					是 output_tokens（总输出令牌）的一个子集。它单独列出来，是为了让开发者知道“模型花了多少
+					算力在内部推理/思考上”，Anthropic 官方的 SDK 版本 0.91.1 在定义 TypeScript 类型时，
+					忘记（或还没来得及）在 Usage 接口里加上 thinking_tokens 这个字段。虽然 SDK 的类型定义
+					里没有，但我们实际测试过真实的 API 接口，确认接口的返回值里确实有这个字段。所以我们可以放心
+					地绕过 TypeScript 的类型检查去读取它。 
+					*/
 					const thinkingTokens = (event.usage as { output_tokens_details?: { thinking_tokens?: number } })
 						.output_tokens_details?.thinking_tokens;
 					if (thinkingTokens != null) {
 						output.usage.reasoning = thinkingTokens;
 					}
-					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					calculateCost(model, output.usage);
 				}
 			}
-
+			// 遍历结束后先检查取消和错误状态
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
@@ -768,6 +953,9 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				throw new Error(output.errorMessage || "An unknown error occurred");
 			}
 
+			// push(done) 做两件事：
+			// - 将 done 事件交给 for await 消费者
+			// - 让 stream.result() 得到 output
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
