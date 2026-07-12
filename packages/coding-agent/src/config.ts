@@ -508,59 +508,107 @@ export function getShareViewerUrl(gistId: string): string {
 }
 
 // =============================================================================
-// User Config Paths (~/.pi/agent/*)
+// 用户级配置路径 (~/.pi/agent/*)
 // =============================================================================
 
-/** Get the agent config directory (e.g., ~/.pi/agent/) */
+/* 
+agentDir 是 Pi Coding Agent 的用户级数据目录，默认是：
+~/.pi/agent/
+它主要存放与用户和 Agent 运行环境相关的数据，而不是当前代码项目本身的文件。
+大致内容是：
+~/.pi/agent/
+├── settings.json     用户设置
+├── auth.json         API Key、OAuth 等认证信息
+├── models.json       自定义模型和 Provider 配置
+├── themes/           自定义界面主题
+├── tools/            用户自定义工具
+├── prompts/          Prompt 模板
+├── sessions/         历史会话记录
+├── bin/              Agent 管理的命令行程序
+└── pi-debug.log      调试日志
+
+各部分作用如下：
+settings.json：默认模型、界面设置、运行选项等用户偏好。
+auth.json：Anthropic、OpenAI、GitHub Copilot 等服务的凭证。
+models.json：内置目录之外的模型、API 地址和兼容配置。
+themes/：用户安装或编写的主题。
+tools/：扩展 Agent 能力的工具定义。
+prompts/：可重复使用的提示词模板。
+sessions/：对话历史、消息、模型调用和工具调用记录。
+bin/：Pi 下载或管理的 rg、fd 等二进制程序。
+调试日志：记录运行异常和诊断信息。
+
+它和项目目录的区别是：
+- 项目目录
+/Users/andy/code/my-project
+→ 项目源代码、package.json、git 等
+
+- Agent 目录
+~/.pi/agent
+→ Pi 自身的用户配置、认证、会话和扩展
+
+同一台机器上可以用 Pi 处理很多项目，但这些项目通常共享同一个用户级 agentDir。
+另外，它可以通过环境变量改到其他位置：PI_AGENT_DIR=/custom/path
+此时所有用户级数据都会改为：
+- /custom/path/settings.json
+- /custom/path/auth.json
+- /custom/path/sessions/
+- ...
+所以 agentDir 可以理解为 Pi Coding Agent 的“用户数据和配置主目录”。其中 auth.json 可能包含敏感凭证，不适合提交到 Git 或公开分享。 
+*/
 export function getAgentDir(): string {
+	// 优先读取环境变量
 	const envDir = process.env[ENV_AGENT_DIR];
 	if (envDir) {
 		return expandTildePath(envDir);
 	}
+	// homedir 返回当前用户主目录 /Users/xxx
+	// CONFIG_DIR_NAME 是 .pi
+	// 最后得到/Users/xxx/.pi/agent
 	return join(homedir(), CONFIG_DIR_NAME, "agent");
 }
 
-/** Get path to user's custom themes directory */
+/** 返回用户自定义主题目录路径 */
 export function getCustomThemesDir(): string {
 	return join(getAgentDir(), "themes");
 }
 
-/** Get path to models.json */
+/** 返回自定义模型配置文件路径 */
 export function getModelsPath(): string {
 	return join(getAgentDir(), "models.json");
 }
 
-/** Get path to auth.json */
+/** 返回认证信息文件路径 */
 export function getAuthPath(): string {
 	return join(getAgentDir(), "auth.json");
 }
 
-/** Get path to settings.json */
+/** 返回设置文件路径 */
 export function getSettingsPath(): string {
 	return join(getAgentDir(), "settings.json");
 }
 
-/** Get path to tools directory */
+/** 返回工具目录路径 */
 export function getToolsDir(): string {
 	return join(getAgentDir(), "tools");
 }
 
-/** Get path to managed binaries directory (fd, rg) */
+/** 返回项目管理的可执行程序目录路径 (fd, rg) */
 export function getBinDir(): string {
 	return join(getAgentDir(), "bin");
 }
 
-/** Get path to prompt templates directory */
+/** 返回提示词模板目录路径 */
 export function getPromptsDir(): string {
 	return join(getAgentDir(), "prompts");
 }
 
-/** Get path to sessions directory */
+/** 返回会话目录路径 */
 export function getSessionsDir(): string {
 	return join(getAgentDir(), "sessions");
 }
 
-/** Get path to debug log file */
+/** 返回调试日志文件路径 */
 export function getDebugLogPath(): string {
 	return join(getAgentDir(), `${APP_NAME}-debug.log`);
 }

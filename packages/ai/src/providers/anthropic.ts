@@ -15,6 +15,8 @@ export function anthropicProvider(): Provider<"anthropic-messages"> {
 			oauth: lazyOAuth({ name: "Anthropic (Claude Pro/Max)", load: loadAnthropicOAuth }),
 		},
 		models: Object.values(ANTHROPIC_MODELS),
+		// anthropicMessagesApi() 是懒加载包装器，它会在第一次被调用时动态加载 anthropic-messages.ts 模块
+		// lazyApi() 返回 stream() 和 streamSimple() 两个方法
 		api: anthropicMessagesApi(),
 	});
 }

@@ -78,6 +78,13 @@ export function normalizePath(input: string, options: PathInputOptions = {}): st
 	return normalized;
 }
 
+// 输入路径
+//   ↓
+// 处理 ~、file://、空格等特殊形式
+//   ↓
+// 判断是否已经是绝对路径
+//   ├─ 是 → 直接规范化
+//   └─ 否 → 相对于 baseDir 转成绝对路径
 export function resolvePath(input: string, baseDir: string = process.cwd(), options: PathInputOptions = {}): string {
 	const normalized = normalizePath(input, options);
 	const normalizedBaseDir = normalizePath(baseDir);

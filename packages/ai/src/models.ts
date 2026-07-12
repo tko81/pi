@@ -280,6 +280,7 @@ class ModelsImpl implements MutableModels {
 		return resolveProviderAuth(provider, model, this.credentials, this.authContext);
 	}
 
+	// 根据模型找到 Provider
 	private requireProvider(model: Model<Api>): Provider {
 		const provider = this.providers.get(model.provider);
 		if (!provider) {
@@ -322,8 +323,13 @@ class ModelsImpl implements MutableModels {
 		options?: ApiStreamOptions<TApi>,
 	): AssistantMessageEventStream {
 		return lazyStream(model, async () => {
+			// 根据模型找到 Provider
 			const provider = this.requireProvider(model);
+			// 解析 API Key 或 OAuth
 			const { requestModel, requestOptions } = await this.applyAuth(model, options as StreamOptions | undefined);
+			// 合并认证请求头
+			// 调用 provider.stream()
+			// 返回 AssistantMessageEventStream
 			return provider.stream(requestModel as Model<TApi>, context, requestOptions as ApiStreamOptions<TApi>);
 		});
 	}

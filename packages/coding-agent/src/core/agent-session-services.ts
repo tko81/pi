@@ -217,12 +217,14 @@ export async function createAgentSessionFromServices(
 	options: CreateAgentSessionFromServicesOptions,
 ): Promise<CreateAgentSessionResult> {
 	return createAgentSession({
+		// 传入 AgentSessionServices 中的 cwd、agentDir、authStorage、settingsManager、modelRegistry、resourceLoader
 		cwd: options.services.cwd,
 		agentDir: options.services.agentDir,
 		authStorage: options.services.authStorage,
 		settingsManager: options.services.settingsManager,
 		modelRegistry: options.services.modelRegistry,
 		resourceLoader: options.services.resourceLoader,
+
 		sessionManager: options.sessionManager,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,

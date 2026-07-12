@@ -390,25 +390,33 @@ export interface SettingsError {
 	error: Error;
 }
 
+// 负责从磁盘读取和写入设置文件，并使用文件锁降低并发冲突
 export class FileSettingsStorage implements SettingsStorage {
+	// 全局设置文件路径，默认是 ~/.pi/agent/settings.json
 	private globalSettingsPath: string;
+	// 项目设置文件路径，默认是 <cwd>/.pi/settings.json，通常项目设置会覆盖全局设置中的同名选项
 	private projectSettingsPath: string;
 
 	constructor(cwd: string, agentDir: string) {
+		// 把用户传入的路径统一转换为一个规范的绝对路径，并拼成全局设置文件路径和项目设置文件路径
 		const resolvedCwd = resolvePath(cwd);
 		const resolvedAgentDir = resolvePath(agentDir);
 		this.globalSettingsPath = join(resolvedAgentDir, "settings.json");
 		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
 	}
 
-	// 加锁保证并发读写的原子性
+	// 为了防止并发写配置文件，尝试给设置文件加锁，并返回“释放锁”的函数
 	private acquireLockSyncWithRetry(path: string): () => void {
+		// 最多尝试 10 次，每次锁被占用时等待约 20 毫秒，最后一次失败会直接抛错
 		const maxAttempts = 10;
 		const delayMs = 20;
 		let lastError: unknown;
 		// 重试多次，直到加锁成功或达到最大重试次数
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			try {
+				// 尝试加锁，加锁成功后立即返回解锁函数
+				// realpath: false 表示不要求先通过文件系统解析真实路径，这对于文件尚未创建的情况比较重要
+				// lockfile.lockSync() 返回一个解锁函数，类型是 () => void，用于释放锁
 				return lockfile.lockSync(path, { realpath: false });
 			} catch (error) {
 				const code =
@@ -429,29 +437,33 @@ export class FileSettingsStorage implements SettingsStorage {
 		throw (lastError as Error) ?? new Error("Failed to acquire settings lock");
 	}
 
+	// 读取当前设置，计算新内容，必要时写回
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
 		const path = scope === "global" ? this.globalSettingsPath : this.projectSettingsPath;
+		// 获取父目录，写文件前需要确保目录存在
 		const dir = dirname(path);
 
+		// 保存释放锁函数，如果成功加锁，release 就是解锁函数
 		let release: (() => void) | undefined;
 		try {
 			// 检查文件是否存在
 			const fileExists = existsSync(path);
+			// 如果文件存在：先加锁，再读取，防止读取期间另一个进程正在写入
 			if (fileExists) {
 				// 加锁
 				release = this.acquireLockSyncWithRetry(path);
 			}
-			// 读取文件内容
+			// 读取文件内容，文件存在时，current 是 JSON 字符串，不存在时是 undefined
 			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
-			// 调用回调函数，传入当前内容
+			// 让回调决定新内容，FileSettingsStorage 自己不理解 JSON 设置，它只处理字符串，解析、修改和重新序列化由回调完成
 			const next = fn(current);
 			// 如果回调函数返回了新的内容
 			if (next !== undefined) {
-				// 如果目录不存在，则创建目录
+				// 如果目录不存在，则递归创建目录
 				if (!existsSync(dir)) {
 					mkdirSync(dir, { recursive: true });
 				}
-				// 如果锁不存在，则加锁
+				// 文件原本不存在时再加锁，文件存在时，读取前已经加锁。文件不存在时，之前没有锁；确定要写入后才加锁
 				if (!release) {
 					release = this.acquireLockSyncWithRetry(path);
 				}
@@ -535,13 +547,28 @@ export class SettingsManager {
 		return SettingsManager.fromStorage(storage, options);
 	}
 
-	/** 从任意存储后端创建 SettingsManager */
+	/** 
+	 * 这个方法不依赖磁盘，接受任意实现了 SettingsStorage 的后端 
+	 * 例如可以传入：
+	 * - 文件存储
+	 * - 内存存储
+	 * - 测试用假存储
+	 * - 数据库存储
+	 * 这是一种依赖注入设计
+	*/
 	static fromStorage(storage: SettingsStorage, options: SettingsManagerCreateOptions = {}): SettingsManager {
+		// 判断项目是否可信
 		const projectTrusted = options.projectTrusted ?? true;
+		// 读取并解析全局设置
+		// 返回结果中包含：
+		// - settings: 解析后的设置对象
+		// - error: 解析错误对象
+		// 解析失败不会立刻抛出，而是记录错误
 		const globalLoad = SettingsManager.tryLoadFromStorage(storage, "global");
 		// projectTrusted: false 时不读项目 settings，当作 {}
-		// 不信任项目时不加载 <cwd>/.pi/settings.json，只读全局 settings。
 		const projectLoad = SettingsManager.tryLoadFromStorage(storage, "project", projectTrusted);
+
+		// 记录解析错误
 		const initialErrors: SettingsError[] = [];
 		if (globalLoad.error) {
 			initialErrors.push({ scope: "global", error: globalLoad.error });
@@ -549,8 +576,10 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			initialErrors.push({ scope: "project", error: projectLoad.error });
 		}
-		// 用上面查到的全局、项目 settings，以及错误列表，创建 SettingsManager
-		// SettingsManager 的构造函数内有根据 projectTrusted 合并全局、项目 settings 的逻辑
+		/* 
+		创建最终设置管理器，随后在内部合并设置，通常类似：
+		全局设置 + 项目设置覆盖同名字段 = 最终有效设置
+		*/
 		return new SettingsManager(
 			storage,
 			globalLoad.settings,

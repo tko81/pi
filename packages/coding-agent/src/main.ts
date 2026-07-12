@@ -483,9 +483,9 @@ export async function main(args: string[], options?: MainOptions) {
 
 	// 获取当前工作目录
 	const cwd = process.cwd();
-	// 获取代理目录
+	// 获取 Agent 配置目录的路径，默认是 ~/.pi/agent，目录内有所有其他配置文件
 	const agentDir = getAgentDir();
-	// 创建引导设置管理器
+	// 创建启动时设置管理器
 	const bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
 	// 应用 HTTP 代理设置
 	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
@@ -503,11 +503,12 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(exitCode);
 		return;
 	}
-
+	// 处理配置命令，如果是配置类命令，处理完后直接从 main() 返回，不再创建 Agent 会话
 	if (await handleConfigCommand(args, { extensionFactories: options?.extensionFactories })) {
 		return;
 	}
 
+	// 解析命令行参数
 	const parsed = parseArgs(args);
 	if (parsed.diagnostics.length > 0) {
 		for (const d of parsed.diagnostics) {
@@ -515,16 +516,20 @@ export async function main(args: string[], options?: MainOptions) {
 			console.error(color(`${d.type === "error" ? "Error" : "Warning"}: ${d.message}`));
 		}
 		if (parsed.diagnostics.some((d) => d.type === "error")) {
+			// 只要存在错误，就退出程序，退出码为 1
 			process.exit(1);
 		}
 	}
+	// 记录这一启动阶段的耗时，用于性能诊断
 	time("parseArgs");
 
+	// 如果用户执行：pi --version，则打印版本号并退出程序
 	if (parsed.version) {
 		console.log(VERSION);
 		process.exit(0);
 	}
 
+	// 如果用户执行：pi --export，则导出会话并退出程序
 	if (parsed.export) {
 		let result: string;
 		try {
@@ -539,6 +544,12 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(0);
 	}
 
+	// 确定应用模式：
+	// - interactive → 交互式终端界面
+	// - print       → 输出一次结果
+	// - json        → JSON 事件输出
+	// - rpc         → RPC 模式
+	// isTTY 用于判断输入输出是否连接到真实终端
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
 	const shouldTakeOverStdout = appMode !== "interactive" && !isPlainRuntimeMetadataCommand(parsed);
 	if (shouldTakeOverStdout) {
@@ -557,27 +568,33 @@ export async function main(args: string[], options?: MainOptions) {
 	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(cwd);
 	time("runMigrations");
 
+	// 创建启动阶段设置管理器，它基于程序启动时的 cwd 加载，但这个 Manager 暂时主要用于查找会话目录，不一定是最终运行时使用的设置管理器。
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
+	// 收集启动阶段设置管理器的诊断信息
 	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
 
-	// Experimental first-time setup: theme choice and analytics opt-in.
-	// Runs before any runtime services are created so the chosen settings apply everywhere.
+	// 首次启动设置，只在正常交互模式首次运行时展示：
+	// - 主题选择；
+	// - analytics 是否启用。
+	// 查看帮助、列模型或非交互运行时不显示
 	if (appMode === "interactive" && !parsed.help && parsed.listModels === undefined && shouldRunFirstTimeSetup()) {
 		await showFirstTimeSetup(startupSettingsManager);
 		time("firstTimeSetup");
 	}
 
-	// Decide the final runtime cwd before creating cwd-bound runtime services.
-	// --session and --resume may select a session from another project, so project-local
-	// settings, resources, provider registrations, and models must be resolved only after
-	// the target session cwd is known. The startup-cwd settings manager is used only for
-	// sessionDir lookup during session selection.
+	// 确定会话目录，优先级：
+	// --session-dir 参数
+	//  ↓ 没有
+	// 环境变量 ENV_SESSION_DIR
+	// 	↓ 没有
+	// settings.json 中的 sessionDir
 	const envSessionDir = process.env[ENV_SESSION_DIR];
 	const sessionDir =
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
 	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
+	// 如果会话目录不存在，则提示用户选择会话目录，非交互模式无法弹出选择界面，因此直接报错退出
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {
 		if (appMode === "interactive") {
@@ -591,6 +608,7 @@ export async function main(args: string[], options?: MainOptions) {
 			process.exit(1);
 		}
 	}
+	// 设置会话名称
 	if (parsed.name !== undefined) {
 		const name = parsed.name.trim();
 		if (!name) {
@@ -601,6 +619,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createSessionManager");
 
+	// 初始化项目信任管理
 	const trustStore = new ProjectTrustStore(agentDir);
 	const sessionCwd = sessionManager.getCwd();
 	const autoTrustOnReloadCwd =
@@ -610,11 +629,20 @@ export async function main(args: string[], options?: MainOptions) {
 	const trustPromptMode: AppMode = parsed.help || parsed.listModels !== undefined ? "print" : appMode;
 	const projectTrustByCwd = new Map<string, boolean>();
 
+	// 解析 CLI 用户指定的资源路径，这些路径用于加载扩展、技能、提示模板和主题，这些 CLI 路径基于启动时 cwd 解析成绝对路径
 	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
+	// 创建认证存储，它负责读取和管理：API Key；OAuth token；运行时临时 Key，这个实例会被后续模型注册表和 Agent 会话共享
 	const authStorage = AuthStorage.create();
+	// 定义运行时工厂，这里暂时只是定义函数，还没有执行内部代码。
+	// 为什么使用工厂？因为会话运行中可能：
+	// - 切换 cwd；
+	// - 重新加载项目；
+	// - 恢复其他会话；
+	// - 重建资源和服务。
+	// 每次都可以针对新的 cwd 调用这个工厂
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		cwd,
 		agentDir,
@@ -626,6 +654,10 @@ export async function main(args: string[], options?: MainOptions) {
 		const projectTrustDiagnostics: AgentSessionRuntimeDiagnostic[] = [];
 		const cachedProjectTrust = projectTrustByCwd.get(cwd);
 		const hasTrustRequiringResources = hasTrustRequiringProjectResources(cwd);
+		// 如果项目中存在需要信任的资源，而且：
+		// - CLI 没有明确指定信任
+		// - 缓存中没有判断结果
+		// 则先按不可信状态创建设置管理器
 		const shouldResolveProjectTrust =
 			parsed.projectTrustOverride === undefined && cachedProjectTrust === undefined && hasTrustRequiringResources;
 		const projectTrusted = shouldResolveProjectTrust
@@ -633,7 +665,17 @@ export async function main(args: string[], options?: MainOptions) {
 			: (cachedProjectTrust ??
 				parsed.projectTrustOverride ??
 				(!hasTrustRequiringResources || trustStore.get(cwd) === true));
+		// 创建当前 cwd 的设置管理器，这才是最终运行时设置管理器
+		// 它和之前的 startupSettingsManager 区别是：
+		// startupSettingsManager
+		// → 基于启动终端 cwd
+		// → 主要帮助查找会话
+		
+		// runtimeSettingsManager
+		// → 基于会话真实 cwd
+		// → 真正加载项目设置并运行 Agent
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+		// 创建运行时服务，它会创建和加载：SettingsManager、ModelRegistry、ResourceLoader、扩展、Skills、Prompt 模板、主题、Provider 注册
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
@@ -664,6 +706,7 @@ export async function main(args: string[], options?: MainOptions) {
 						},
 					}
 				: undefined,
+			// 禁用哪些资源，哪些资源需要额外添加，哪些系统提示词需要附加
 			resourceLoaderOptions: {
 				additionalExtensionPaths: resolvedExtensionPaths,
 				additionalSkillPaths: resolvedSkillPaths,
@@ -680,6 +723,7 @@ export async function main(args: string[], options?: MainOptions) {
 			},
 		});
 		const { settingsManager, modelRegistry, resourceLoader } = services;
+		// 汇总诊断信息，汇总：项目信任警告、服务创建诊断、settings.json 错误、扩展加载失败（不一定立即退出，而是把问题带到上层统一展示）
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
 			...projectTrustDiagnostics, // 数组中的每个元素展开
 			...services.diagnostics,
@@ -690,9 +734,14 @@ export async function main(args: string[], options?: MainOptions) {
 			})),
 		];
 
+		// 确定可用模型范围
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =
 			modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
+		
+		// 构建会话选项
+		// 综合 CLI 参数、模型范围、当前会话是否已有消息、模型注册表和用户设置
+		// 生成当前模型、thinking level、工具配置、排除工具和自定义工具。
 		const {
 			options: sessionOptions,
 			cliThinkingFromModel,
@@ -706,6 +755,7 @@ export async function main(args: string[], options?: MainOptions) {
 		);
 		diagnostics.push(...sessionOptionDiagnostics);
 
+		// 处理命令行 API Key，--api-key 必须同时能够确定模型，因为需要知道这个 Key 属于哪个 Provider
 		if (parsed.apiKey) {
 			if (!sessionOptions.model) {
 				diagnostics.push({
@@ -713,10 +763,12 @@ export async function main(args: string[], options?: MainOptions) {
 					message: "--api-key requires a model to be specified via --model, --provider/--model, or --models",
 				});
 			} else {
+				// 这个 Key 只写入运行时存储，不一定持久化到 auth.json，因为 runtime 随时可能重建
 				authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsed.apiKey);
 			}
 		}
 
+		// 创建 AgentSession，这一步真正把会话管理、模型、thinking、工具、设置、资源组合成可运行的 AgentSession。
 		const created = await createAgentSessionFromServices({
 			services,
 			sessionManager,
@@ -729,6 +781,7 @@ export async function main(args: string[], options?: MainOptions) {
 			noTools: sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
 		});
+		// 应用 CLI thinking 覆盖，如果 CLI 明确指定 thinking，或者模型参数本身带出了 thinking 配置，就确保它覆盖历史会话保存的值
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
 		if (created.session.model && cliThinkingOverride) {
 			created.session.setThinkingLevel(created.session.thinkingLevel);
@@ -741,6 +794,8 @@ export async function main(args: string[], options?: MainOptions) {
 		};
 	};
 	time("createRuntime");
+	// 定义完 createRuntime 后，这里才真正创建了 AgentSessionRuntime 实例
+	// 返回内容包括：services、session、modelFallbackMessage、diagnostics。
 	const runtime = await createAgentSessionRuntime(createRuntime, {
 		cwd: sessionManager.getCwd(),
 		agentDir,
@@ -749,9 +804,12 @@ export async function main(args: string[], options?: MainOptions) {
 	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
 	const { settingsManager, modelRegistry, resourceLoader } = services;
+
+	// 基于最终加载的 settings 重新配置 Undici 的 HTTP/HTTPS 代理、请求头等待超时、SSE 响应体空闲超时以及全局连接调度器。
 	applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 
+	// 如果用户执行：pi --help，则打印帮助并退出程序
 	if (parsed.help) {
 		const extensionFlags = resourceLoader
 			.getExtensions()
@@ -760,13 +818,14 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(0);
 	}
 
+	// 如果用户执行：pi --list-models，则列出模型并退出程序
 	if (parsed.listModels !== undefined) {
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
 		await listModels(modelRegistry, searchPattern);
 		process.exit(0);
 	}
 
-	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
+	// 读取标准输入内容，跳过 RPC 模式，因为它使用标准输入进行 JSON-RPC
 	let stdinContent: string | undefined;
 	if (appMode !== "rpc") {
 		stdinContent = await readPipedStdin();
@@ -776,45 +835,55 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("readPipedStdin");
 
+	// 准备初始消息，包括：初始消息、初始图片
 	const { initialMessage, initialImages } = await prepareInitialMessage(
 		parsed,
 		settingsManager.getImageAutoResize(),
 		stdinContent,
 	);
 	time("prepareInitialMessage");
+
+	// 初始化主题
 	initTheme(settingsManager.getTheme(), appMode === "interactive");
 	time("initTheme");
 
-	// Show deprecation warnings in interactive mode
+	// 显示弃用警告，只在交互模式下显示
 	if (appMode === "interactive" && deprecationWarnings.length > 0) {
 		await showDeprecationWarnings(deprecationWarnings);
 	}
 
+	// 汇总诊断信息，包括：项目信任警告、服务创建诊断、settings.json 错误、扩展加载失败（不一定立即退出，而是把问题带到上层统一展示）
 	time("resolveModelScope");
 	reportDiagnostics(runtime.diagnostics);
 	if (runtime.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
+		// 如果诊断信息中包含扩展加载失败，则提示用户尝试重新加载项目
 		if (runtime.diagnostics.some((diagnostic) => diagnostic.message.includes("Failed to load extension"))) {
 			console.error(chalk.yellow(EXTENSION_LOAD_FAILURE_HINT));
 		}
 		process.exit(1);
 	}
+
 	time("createAgentSession");
 
+	// 如果非交互模式且没有模型，则提示用户没有可用模型
 	if (appMode !== "interactive" && !session.model) {
 		console.error(chalk.red(formatNoModelsAvailableMessage()));
 		process.exit(1);
 	}
 
+	// 如果用户执行：PI_STARTUP_BENCHMARK，则启动性能基准测试
 	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
 		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
 		process.exit(1);
 	}
 
+	// 执行 RPC 模式
 	if (appMode === "rpc") {
 		printTimings();
 		await runRpcMode(runtime);
 	} else if (appMode === "interactive") {
+		// 执行交互模式
 		const interactiveMode = new InteractiveMode(runtime, {
 			migratedProviders,
 			modelFallbackMessage,
