@@ -159,6 +159,29 @@ export interface DefaultResourceLoaderOptions {
 	appendSystemPromptOverride?: (base: string[]) => string[];
 }
 
+/* 
+重新加载 Settings
+       ↓
+PackageManager 解析资源来源
+       ↓
+处理项目可信状态
+       ↓
+加载 Extensions
+       ↓
+加载 Skills
+       ↓
+加载 Prompt Templates
+       ↓
+加载 Themes
+       ↓
+加载 AGENTS.md / CLAUDE.md
+       ↓
+加载 system prompt
+       ↓
+加载 append system prompt
+       ↓
+把结果保存到 ResourceLoader 内部字段 
+*/
 export class DefaultResourceLoader implements ResourceLoader {
 	private cwd: string;
 	private agentDir: string;
@@ -338,6 +361,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return this.loadCurrentExtensionSet({ includeInlineFactories: true });
 	}
 
+	// 清除扩展缓存，如果之前已经加载过，重新加载时先清除扩展模块缓存，确保扩展代码修改后能生效
 	async reload(options?: ResourceLoaderReloadOptions): Promise<void> {
 		resetTimings("extensions");
 
@@ -346,14 +370,19 @@ export class DefaultResourceLoader implements ResourceLoader {
 		}
 
 		let preTrustExtensions: LoadExtensionsResult | undefined;
+		// 处理项目信任：因为项目内扩展可以执行代码（危险动作），所以不能在用户确认项目可信之前直接加载
+		// 流程是先只加载安全范围内的全局扩展，然后询问用户是否信任项目，只有可信后才加载项目本地资源
 		if (options?.resolveProjectTrust) {
 			preTrustExtensions = await this.loadProjectTrustExtensions();
 			const projectTrusted = await options.resolveProjectTrust({ extensionsResult: preTrustExtensions });
 			this.settingsManager.setProjectTrusted(projectTrusted);
 		}
 
-		// reload() preserves SettingsManager.projectTrusted and reloads settings for that trust state.
+		// 重新加载配置
+		// 确保资源发现使用当前最新设置，例如设置中可能指定启用或禁用哪些扩展、额外 Skills 包、额外 Prompt 路径和项目资源配置
 		await this.settingsManager.reload();
+		// 解析所有资源路径，DefaultPackageManager 负责发现和解析：extensions、skills、prompts、themes
+		// 每个资源除了路径，还包含是否启用、来源、scope、是否来自 package、baseDir 等元数据
 		const resolvedPaths = await this.packageManager.resolve();
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 			temporary: true,
@@ -364,7 +393,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.extensionPromptSourceInfos = new Map();
 		this.extensionThemeSourceInfos = new Map();
 
-		// Helper to extract enabled paths and store metadata
+		// 提取启用资源的辅助函数，把资源路径和元数据存储到 metadataByPath 中，方便后续使用
 		const getEnabledResources = (resources: ResolvedResource[]): ResolvedResource[] => {
 			for (const r of resources) {
 				if (!metadataByPath.has(r.path)) {
@@ -404,6 +433,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			? cliEnabledExtensions
 			: this.mergePaths(cliEnabledExtensions, enabledExtensions);
 
+		// 加载 Extensions
 		const extensionsResult = await this.loadFinalExtensionSet(extensionPaths, preTrustExtensions);
 		for (const p of this.additionalExtensionPaths) {
 			if (isLocalPath(p)) {
@@ -420,6 +450,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			? this.mergePaths(cliEnabledSkills, this.additionalSkillPaths)
 			: this.mergePaths([...cliEnabledSkills, ...enabledSkills], this.additionalSkillPaths);
 
+		// 加载 Skills
 		this.lastSkillPaths = skillPaths;
 		this.updateSkillsFromPaths(skillPaths, metadataByPath);
 		for (const p of this.additionalSkillPaths) {
@@ -436,6 +467,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			: this.mergePaths([...cliEnabledPrompts, ...enabledPrompts], this.additionalPromptTemplatePaths);
 
 		this.lastPromptPaths = promptPaths;
+		// 加载 Prompt Templates
 		this.updatePromptsFromPaths(promptPaths, metadataByPath);
 		for (const p of this.additionalPromptTemplatePaths) {
 			if (isLocalPath(p)) {
@@ -455,6 +487,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			: this.mergePaths([...cliEnabledThemes, ...enabledThemes], this.additionalThemePaths);
 
 		this.lastThemePaths = themePaths;
+		// 加载 Themes
 		this.updateThemesFromPaths(themePaths, metadataByPath);
 		for (const p of this.additionalThemePaths) {
 			const resolved = this.resolveResourcePath(p);

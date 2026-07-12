@@ -368,8 +368,7 @@ export class AgentSession {
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
-		// Always subscribe to agent events for internal handling
-		// (session persistence, extensions, auto-compaction, retry logic)
+		// subscribe() 的返回值不是“订阅结果”，而是一个用来取消本次订阅的函数
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
@@ -530,21 +529,35 @@ export class AgentSession {
 	// 为了进行自动上下文压缩检查，而追踪最近的一条助手消息
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
-	/** Internal handler for agent events - shared by subscribe and reconnect */
+	/** 
+	 * AgentSession 订阅底层 AgentEvent 后的统一处理入口，_handleAgentEvent 是底层 Agent 与上层应用之间的桥梁
+	 * 它把 Agent 事件转发给扩展和 UI，同时负责排队状态、对话持久化、自动压缩依据和重试状态管理
+	 * 
+	 * 它主要完成四件事：
+	 * 1. 更新 steering/follow-up 的 UI 队列
+	 * 2. 把事件发送给扩展
+	 * 3. 把事件转发给 AgentSession 的监听器
+	 * 4. 把完成的消息保存到 SessionManager
+	*/
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
-		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
-		// This ensures the UI sees the updated queue state
+		// 处理用户排队消息，这表示 Agent 正式开始处理一条用户消息
+		// 用户消息可能来自当前正常输入、steering 队列或 follow-up 队列，若来自队列则应从 UI 的“待处理消息”中移除
 		if (event.type === "message_start" && event.message.role === "user") {
+			// 重置溢出恢复状态，新的用户消息开始后，之前针对上下文溢出所做的恢复尝试不再属于当前消息，因此重置标志
+			// _overflowRecoveryAttempted 用来限制“针对同一次请求的上下文超限，最多自动压缩并重试一次”。它不是
+			// 全局永久标志，而是针对当前这次用户请求的恢复状态
 			this._overflowRecoveryAttempted = false;
+			// 提取消息文本，用户消息的 content 是结构化数组，可能包含文本和图片。这个辅助方法从中提取用于队列匹配的文本
 			const messageText = this._getUserMessageText(event.message);
 			if (messageText) {
-				// Check steering queue first
+				// 优先匹配 steering 队列
 				const steeringIndex = this._steeringMessages.indexOf(messageText);
+				// 如果匹配到，则从队列中移除，并更新 UI 队列
 				if (steeringIndex !== -1) {
 					this._steeringMessages.splice(steeringIndex, 1);
 					this._emitQueueUpdate();
 				} else {
-					// Check follow-up queue
+					// 没在 steering 中，再找 follow-up
 					const followUpIndex = this._followUpMessages.indexOf(messageText);
 					if (followUpIndex !== -1) {
 						this._followUpMessages.splice(followUpIndex, 1);
@@ -554,44 +567,57 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
+		// 先通知扩展，把底层 Agent 事件交给扩展系统（例如扩展可能监听消息开始和结束、工具调用、turn 结束、Agent 结束）
+		// 并使用 await 确保扩展处理完成后再继续向其他监听器转发，如果扩展处理很慢，也会延迟后续步骤和底层 Agent 运行
 		await this._emitExtensionEvent(event);
 
-		// Notify all listeners
+		// 通知 AgentSession 监听器，this._emit() 与底层 Agent 的 emit 不是同一个东西。这里是把事件继续转发给订阅 
+		// AgentSession 的 UI、RPC 等模块。普通事件原样转发，Agent_end 事件则添加 willRetry 标志，用于决定是否重试
+		// 这是为了告诉 UI：Agent 本轮虽然结束了，但 AgentSession 是否准备，自动重试，因此 UI 收到 agent_end 后不一
+		// 定马上显示“任务彻底结束”，还可以根据 willRetry 显示重试状态。
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
 
-		// Handle session persistence
+		// 在 message_end 时持久化消息，只在消息完整结束后保存，而不在 message_start 或 message_update 时保存，这
+		// 样不会把每一个流式 token 都写入 Session 文件，只保存完整消息
 		if (event.type === "message_end") {
-			// Check if this is a custom message from extensions
+			// 保存扩展自定义消息，custom 消息不是标准 LLM 消息，需使用专门的存储方法 appendCustomMessageEntry()
+			// 它可能包含扩展定义的消息类型、内容、展示方式和额外数据
 			if (event.message.role === "custom") {
-				// Persist as CustomMessageEntry
 				this.sessionManager.appendCustomMessageEntry(
 					event.message.customType,
 					event.message.content,
 					event.message.display,
 					event.message.details,
 				);
-			} else if (
+			} 
+			// 保存标准 LLM 消息，标准对话消息通过 appendMessage() 写入 Session JSONL，流程为 message_end → AgentSession 
+			// 收到完整消息 → SessionManager.appendMessage() → 保存到当前 Session 分支
+			else if (
 				event.message.role === "user" ||
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(event.message);
 			}
-			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
+			// 而 bashExecution、compactionSummary、branchSummary 等其他消息类型各有专门的产生和持久化位置，不在此处
+			// 保存，以避免重复保存
 
-			// Track assistant message for auto-compaction (checked on agent_end)
+			// 记录最后一条 assistant 消息，AgentSession 保存最近完成的 assistant 消息，并在后续 agent_end 时用于检
+			// 查是否发生上下文溢出、是否需要自动压缩、是否需要自动重试以及本轮是否正常完成
 			if (event.message.role === "assistant") {
 				this._lastAssistantMessage = event.message;
 
+				// 重置上下文溢出恢复标志，如果 assistant 消息不是错误结果，说明这次模型调用成功；因此即使之前执行过“上下文
+				// 溢出恢复”，成功后也应清除相关标志，确保以后真正发生的新溢出仍能重新尝试恢复
 				const assistantMsg = event.message as AssistantMessage;
 				if (assistantMsg.stopReason !== "error") {
 					this._overflowRecoveryAttempted = false;
 				}
 
-				// Reset retry counter immediately on successful assistant response
-				// This prevents accumulation across multiple LLM calls within a turn
+				// 成功后结束重试状态，条件表示当前 assistant 响应成功且之前确实执行过自动重试，此时发出事件通知 UI 或 RPC 
+				// 自动重试成功结束，并立即清零重试计数（注释强调“立即”清零，是因为一次 Agent 运行中可能有多轮 LLM 调用：
+				// LLM 调用 → toolCall → 工具执行 → LLM 再次调用 → 最终回答。只要某次重试后的 assistant 响应成功，就应
+				// 结束这次错误重试状态，不能让计数继续积累到后续模型调用）。
 				if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
 					this._emit({
 						type: "auto_retry_end",

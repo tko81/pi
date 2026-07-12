@@ -261,17 +261,43 @@ function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string,
 	}
 }
 
+/* 
+这个函数根据命令行参数决定：本次运行应该使用临时会话、新会话、已有会话，还是从已有会话 fork 一个新会话
+整体判断优先级是：
+禁用会话/help/list-models
+→ fork
+→ 指定 session
+→ resume 选择会话
+→ continue 最近会话
+→ 按 sessionId 查找
+→ 创建新会话
+
+一旦某个分支返回，后面的分支不再执行。
+*/
 async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	sessionDir: string | undefined,
 	settingsManager: SettingsManager,
 ): Promise<SessionManager> {
+	/* 
+	使用内存会话
+	以下情况不会把 session 写入磁盘：
+	1. --no-session：明确禁用会话持久化；
+	2.--help：只显示帮助；
+	3.--list-models：只显示模型列表。
+	因此创建：SessionManager.inMemory(...)
+
+	它可以在当前进程中管理消息，但不会保存到 sessions 目录
+	如果指定了 sessionId，内存会话也使用这个 ID
+	*/
 	if (parsed.noSession || parsed.help || parsed.listModels !== undefined) {
 		return SessionManager.inMemory(cwd, parsed.sessionId !== undefined ? { id: parsed.sessionId } : undefined);
 	}
 
+	// Fork 会话，fork 表示从已有会话复制上下文，创建一个新的独立会话
 	if (parsed.fork) {
+		// 检查目标 ID 是否冲突，如果用户给新 fork 指定了 ID，先确认当前项目中没有同名会话，避免覆盖已有会话
 		if (parsed.sessionId) {
 			const existingTarget = await findLocalSessionByExactId(parsed.sessionId, cwd, sessionDir);
 			if (existingTarget) {
@@ -280,8 +306,10 @@ async function createSessionManager(
 			}
 		}
 
+		// 查找源会话，parsed.fork 可以是：具体文件路径；当前项目的会话 ID；其他项目中的全局会话 ID
 		const resolved = await resolveSessionPath(parsed.fork, cwd, sessionDir);
 
+		// 根据查找结果处理，无论源会话在哪里，都 fork 到当前 cwd，如果没找到，打印错误并以退出码 1 结束
 		switch (resolved.type) {
 			case "path":
 			case "local":
@@ -294,14 +322,18 @@ async function createSessionManager(
 		}
 	}
 
+	// 打开指定会话，这个分支表示用户指定了一个已有会话，但不是明确 fork，先解析会话路径，再根据类型处理
 	if (parsed.session) {
 		const resolved = await resolveSessionPath(parsed.session, cwd, sessionDir);
 
 		switch (resolved.type) {
+			// 文件路径或当前项目会话，直接打开原会话，后续内容继续写入这个会话
 			case "path":
 			case "local":
 				return openSessionOrExit(resolved.path, sessionDir);
 
+			// 找到其他项目的会话，先提示：Session found in different project: ...，然后询问用户是否 fork
+			// 用户确认后，复制成当前项目的新会话，后续内容继续写入这个新会话。拒绝则退出程序
 			case "global": {
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
 				const shouldFork = await promptConfirm("Fork this session into current directory?");
@@ -318,6 +350,13 @@ async function createSessionManager(
 		}
 	}
 
+	/* 
+	resume 选择会话，resume 会打开会话选择界面，而不是直接决定某个会话
+	它提供两种列表来源：
+	1. SessionManager.list(...) - 列出当前项目的会话
+	2. SessionManager.listAll(...) - 列出所有项目的会话
+	onProgress 用于会话扫描期间更新界面进度
+	*/
 	if (parsed.resume) {
 		try {
 			const selectedPath = await selectSession(
@@ -335,10 +374,12 @@ async function createSessionManager(
 		}
 	}
 
+	// 继续最近会话，寻找当前项目最近一次会话并继续
 	if (parsed.continue) {
 		return SessionManager.continueRecent(cwd, sessionDir);
 	}
 
+	// 按 session ID 查找，如果没有前面的 fork/session/resume/continue，但指定了 ID，则打开指定会话，语义是继续这个会话
 	if (parsed.sessionId) {
 		const existingSession = await findLocalSessionByExactId(parsed.sessionId, cwd, sessionDir);
 		if (existingSession) {
@@ -346,6 +387,8 @@ async function createSessionManager(
 		}
 	}
 
+	// 指定了尚不存在的 sessionId：用这个 ID 创建
+	// 没指定：由 SessionManager 自动生成 ID
 	return SessionManager.create(cwd, sessionDir, { id: parsed.sessionId });
 }
 
@@ -582,12 +625,42 @@ export async function main(args: string[], options?: MainOptions) {
 		time("firstTimeSetup");
 	}
 
-	// 确定会话目录，优先级：
-	// --session-dir 参数
-	//  ↓ 没有
-	// 环境变量 ENV_SESSION_DIR
-	// 	↓ 没有
-	// settings.json 中的 sessionDir
+	/* 	
+	确定sessionDir，这个目录是 Pi 会话文件的根目录，用来存放历史会话。优先级：
+	--session-dir 参数
+	 ↓ 没有
+	环境变量 ENV_SESSION_DIR
+		↓ 没有
+	settings.json 中的 sessionDir
+
+	如果没有特别配置，一般会落在 Agent 用户目录下，例如：~/.pi/agent/sessions/
+	里面可能按照项目路径组织会话文件，概念上类似：
+	~/.pi/agent/sessions/
+	├── project-a/
+	│   ├── session-001.jsonl
+	│   └── session-002.jsonl
+	├── project-b/
+	│   └── session-003.jsonl
+	└── ...
+	具体目录名可能会对项目路径做编码或转换，不一定直接使用 project-a 这种名称。
+	会话文件通常保存：
+	- 用户消息
+	- assistant 回复
+	- thinking 内容
+	- 工具调用和工具结果
+	- 模型和 Provider 信息
+	- token 用量
+	- 会话 ID、名称、时间等元数据
+	- 会话对应的工作目录 cwd
+	- 模型或 thinking 等配置变化事件
+	
+	所以可以理解成：
+	sessionDir
+	→ 所有持久化会话的总存储区域
+	
+	SessionManager
+	→ 负责创建、查找、打开、继续和 fork 这些会话 
+	*/
 	const envSessionDir = process.env[ENV_SESSION_DIR];
 	const sessionDir =
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
@@ -672,7 +745,7 @@ export async function main(args: string[], options?: MainOptions) {
 		// → 主要帮助查找会话
 		
 		// runtimeSettingsManager
-		// → 基于会话真实 cwd
+		// → 基于会话真实的 session cwd
 		// → 真正加载项目设置并运行 Agent
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
 		// 创建运行时服务，它会创建和加载：SettingsManager、ModelRegistry、ResourceLoader、扩展、Skills、Prompt 模板、主题、Provider 注册

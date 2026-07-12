@@ -131,37 +131,13 @@ function getDefaultAgentDir(): string {
 /**
  * 按指定选项创建 AgentSession。
  *
- * @example
- * ```typescript
- * // 最简用法 — 全部使用默认值
- * const { session } = await createAgentSession();
- *
- * // 显式指定模型
- * import { getModel } from '@earendil-works/pi-ai';
- * const { session } = await createAgentSession({
- *   model: getModel('anthropic', 'claude-opus-4-5'),
- *   thinkingLevel: 'high',
- * });
- *
- * // 继续之前的 session
- * const { session, modelFallbackMessage } = await createAgentSession({
- *   continueSession: true,
- * });
- *
- * // 完全自定义
- * const loader = new DefaultResourceLoader({
- *   cwd: process.cwd(),
- *   agentDir: getAgentDir(),
- *   settingsManager: SettingsManager.create(),
- * });
- * await loader.reload();
- * const { session } = await createAgentSession({
- *   model: myModel,
- *   tools: ["read", "bash"],
- *   resourceLoader: loader,
- *   sessionManager: SessionManager.inMemory(),
- * });
- * ```
+ * 恢复历史 Session
+ * → 选择模型
+ * → 恢复 thinking level
+ * → 创建工具
+ * → 构造系统提示词
+ * → 创建 Agent
+ * → 创建 AgentSession
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
 	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
