@@ -971,7 +971,15 @@ export class DefaultPackageManager implements PackageManager {
 		return configuredPackages;
 	}
 
+	// 负责实际安装或验证 Package
 	async install(source: string, options?: { local?: boolean }): Promise<void> {
+		// 例如 parseSource("npm:pi-subagents")解析得到：
+		// {
+		// 	type: "npm",
+		// 	spec: "pi-subagents",
+		// 	name: "pi-subagents",
+		// 	version: undefined
+		// }
 		const parsed = this.parseSource(source);
 		const scope: SourceScope = options?.local ? "project" : "user";
 		this.assertProjectTrustedForScope(scope);
@@ -995,7 +1003,32 @@ export class DefaultPackageManager implements PackageManager {
 		});
 	}
 
+	/* 
+	installAndPersist()
+    ├─ await install()
+    │   ├─ npm → installNpm()
+    │   ├─ git → installGit()
+    │   └─ local → 检查路径
+    └─ addSourceToSettings()
+        ├─ 已存在且相同 → 不修改
+        ├─ 已存在但配置不同 → 替换
+        └─ 不存在 → 追加 
+
+	pi install npm:pi-subagents
+
+	source 表示 Package 来源，例如：
+	- npm:pi-subagents
+	- npm:pi-subagents@0.34.0
+	- git:github.com/user/repo
+	- ./local-extension
+
+	这里的 local 是“是否安装到项目作用域”：
+	- local: true   → project scope
+	- local: false  → user scope
+	- 未传 options  → user scope
+	*/
 	async installAndPersist(source: string, options?: { local?: boolean }): Promise<void> {
+		// await 它保证安装完成后才写配置，防止安装失败时配置被修改
 		await this.install(source, options);
 		this.addSourceToSettings(source, options);
 	}

@@ -773,27 +773,39 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Run the interactive mode. This is the main entry point.
-	 * Initializes the UI, shows warnings, processes initial messages, and starts the interactive loop.
+	 * 初始化终端 UI
+	 * 后台执行版本和环境检查
+	 * 显示启动警告
+	 * 处理命令行传入的初始消息
+	 * 无限等待用户输入并调用 AgentSession.prompt()
 	 */
 	async run(): Promise<void> {
+		/* 
+		初始化交互界面，这里会等待 UI 初始化完成，例如：
+		- 创建 TUI 组件
+		- 注册键盘输入
+		- 设置终端状态
+		- 绑定 Session 事件
+		- 渲染初始界面
+		必须完成初始化，后面才能安全显示警告、通知和 Agent 输出。 
+		*/
 		await this.init();
 
-		// Start version check asynchronously
+		// 后台异步检查新版本
 		checkForNewPiVersion(this.version).then((newRelease) => {
 			if (newRelease) {
 				this.showNewVersionNotification(newRelease);
 			}
 		});
 
-		// Start package update check asynchronously
+		// 后台异步检查包更新
 		this.checkForPackageUpdates().then((updates) => {
 			if (updates.length > 0) {
 				this.showPackageUpdateNotification(updates);
 			}
 		});
 
-		// Check tmux keyboard setup asynchronously
+		// 后台异步检查 tmux 键盘设置
 		this.checkTmuxKeyboardSetup().then((warning) => {
 			if (warning) {
 				this.showWarning(warning);
@@ -818,9 +830,13 @@ export class InteractiveMode {
 
 		void this.maybeWarnAboutAnthropicSubscriptionAuth();
 
-		// Process initial messages
+		// 处理单条初始消息，initialMessage 通常来自启动命令，例如：pi "解释这个项目"
+		// 程序进入 UI 后，不需要用户再次输入，而是立即调用：
+		// this.session.prompt(initialMessage)
+		// 如果还传入了图片，也一起发送
 		if (initialMessage) {
 			try {
+				// 这里使用 await，所以必须等这一条消息完整运行结束后，才继续处理后续初始消息或进入用户输入循环
 				await this.session.prompt(initialMessage, { images: initialImages });
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
@@ -828,6 +844,7 @@ export class InteractiveMode {
 			}
 		}
 
+		// 处理多条初始消息，如果启动时传入多条消息，就按顺序逐条处理
 		if (initialMessages) {
 			for (const message of initialMessages) {
 				try {
@@ -839,12 +856,15 @@ export class InteractiveMode {
 			}
 		}
 
-		// Main interactive loop
+		// 主交互循环，这是 Pi 交互模式持续运行的核心
 		while (true) {
+			// 等待用户输入，程序会停在这里，直到用户输入内容并提交。它不是不断占用 CPU 检查键盘，而是通过 Promise 异步等待
 			const userInput = await this.getUserInput();
 			try {
+				// 提交给 AgentSession
 				await this.session.prompt(userInput);
 			} catch (error: unknown) {
+				// 错误不会终止交互模式，因此单次请求失败后：回到 while 顶部 → 继续等待下一条输入
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
 			}

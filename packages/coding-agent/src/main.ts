@@ -407,9 +407,10 @@ function buildSessionOptions(
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	let cliThinkingFromModel = false;
 
-	// Model from CLI
-	// - supports --provider <name> --model <pattern>
-	// - supports --model <provider>/<pattern>
+	// ============================ 解析命令行模型参数 ============================
+	// 命令行参数 --provider <name> --model <pattern> 或 --model <provider>/<pattern>
+	// 支持 --model <pattern>:<thinking> 的简写形式
+	// 显式 --thinking 仍然优先（后续处理）
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -425,17 +426,17 @@ function buildSessionOptions(
 		}
 		if (resolved.model) {
 			options.model = resolved.model;
-			// Allow "--model <pattern>:<thinking>" as a shorthand.
-			// Explicit --thinking still takes precedence (applied later).
+			// 允许 --model <pattern>:<thinking> 的简写形式
+			// 如果命令行没有显式 --thinking，则使用模型配置中的 thinking 级别
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
-				cliThinkingFromModel = true;
+				cliThinkingFromModel = true; // 标记 cliThinkingFromModel 为 true
 			}
 		}
 	}
-
+	// ============================ 解析命令行模型参数 ============================
 	if (!options.model && scopedModels.length > 0 && !hasExistingSession) {
-		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
+		// 如果保存的默认模型在 scoped models 中，则使用它，否则使用第一个 scoped model
 		const savedProvider = settingsManager.getDefaultProvider();
 		const savedModelId = settingsManager.getDefaultModel();
 		const savedModel = savedProvider && savedModelId ? modelRegistry.find(savedProvider, savedModelId) : undefined;
@@ -443,27 +444,30 @@ function buildSessionOptions(
 
 		if (savedInScope) {
 			options.model = savedInScope.model;
-			// Use thinking level from scoped model config if explicitly set
+			// 如果模型配置中显式设置了 thinking 级别，则使用它
 			if (!parsed.thinking && savedInScope.thinkingLevel) {
 				options.thinkingLevel = savedInScope.thinkingLevel;
 			}
 		} else {
 			options.model = scopedModels[0].model;
-			// Use thinking level from first scoped model if explicitly set
+			// 如果第一个 scoped model 配置中显式设置了 thinking 级别，则使用它
 			if (!parsed.thinking && scopedModels[0].thinkingLevel) {
 				options.thinkingLevel = scopedModels[0].thinkingLevel;
 			}
 		}
 	}
 
-	// Thinking level from CLI (takes precedence over scoped model thinking levels set above)
+	// ============================ 解析命令行 thinking 参数 ============================
+	// 命令行参数 --thinking <level>
+	// 显式 --thinking 优先级高于 scoped model 中的 thinking 级别
 	if (parsed.thinking) {
 		options.thinkingLevel = parsed.thinking;
 	}
 
-	// Scoped models for Ctrl+P cycling
-	// Keep thinking level undefined when not explicitly set in the model pattern.
-	// Undefined means "inherit current session thinking level" during cycling.
+	// ============================ 解析 scoped models 参数 ============================
+	// scoped models 用于 Ctrl+P 循环选择模型
+	// 当模型配置中没有显式设置 thinking 级别时，保持 thinking level 为 undefined
+	// undefined 表示在循环选择模型时，继承当前会话的 thinking 级别
 	if (scopedModels.length > 0) {
 		options.scopedModels = scopedModels.map((sm) => ({
 			model: sm.model,
@@ -471,10 +475,12 @@ function buildSessionOptions(
 		}));
 	}
 
-	// API key from CLI - set in authStorage
-	// (handled by caller before createAgentSession)
-
-	// Tools
+	// ============================ 解析工具参数 ============================
+	// 命令行参数 --no-tools 或 --no-builtin-tools
+	// 支持 --tools <pattern> 和 --exclude-tools <pattern>
+	// 显式 --tools 或 --exclude-tools 优先级高于 scoped model 中的 tools 配置
+	// tools 和 excludeTools 用于控制工具的启用和禁用
+	// all 表示禁用所有工具，builtin 表示禁用内置工具
 	if (parsed.noTools) {
 		options.noTools = "all";
 	} else if (parsed.noBuiltinTools) {
@@ -867,8 +873,11 @@ export async function main(args: string[], options?: MainOptions) {
 		};
 	};
 	time("createRuntime");
+
+	// ============================ 创建 AgentSessionRuntime 实例 ============================
 	// 定义完 createRuntime 后，这里才真正创建了 AgentSessionRuntime 实例
 	// 返回内容包括：services、session、modelFallbackMessage、diagnostics。
+	// ============================ 创建 AgentSessionRuntime 实例 ============================
 	const runtime = await createAgentSessionRuntime(createRuntime, {
 		cwd: sessionManager.getCwd(),
 		agentDir,

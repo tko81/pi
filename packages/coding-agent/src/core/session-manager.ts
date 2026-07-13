@@ -1477,6 +1477,13 @@ export class SessionManager {
 	 */
 	static create(cwd: string, sessionDir?: string, options?: NewSessionOptions): SessionManager {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
+		/* 
+		cwd          → Session 对应的工作目录
+		dir          → Session 文件存放目录
+		undefined    → 没有现成 Session 文件
+		true         → 需要持久化到磁盘
+		options      → 新 Session 配置，例如指定 ID 
+		*/
 		return new SessionManager(cwd, dir, undefined, true, options);
 	}
 
