@@ -77,16 +77,16 @@ export interface Provider<TApi extends Api = Api> {
 	readonly headers?: ProviderHeaders;
 
 	/**
-	* 这是 Provider 的认证能力，而且是必需字段。
-	* 注释要求每个 Provider 至少支持一种认证语义: apiKey 或 oauth
-	* 例如：
-	*  - OpenAI       → API Key
-	*  - 某些平台     → OAuth
-	*  - AWS Bedrock  → AWS Profile / 环境凭证
-	*  - Google       → ADC 文件
-	*  - 本地模型服务 → 可能不需要真实密钥
-	*  即使本地服务不需要 Key，仍然会通过 apiKey 类型的认证接口提供 resolve()，用来报告 Provider 当前是否可用
-	*  因此 auth 不只是“返回密码”，也承担了：检查这个 Provider 是否已经正确配置
+	 * 这是 Provider 的认证能力，而且是必需字段。
+	 * 注释要求每个 Provider 至少支持一种认证语义: apiKey 或 oauth
+	 * 例如：
+	 *  - OpenAI       → API Key
+	 *  - 某些平台     → OAuth
+	 *  - AWS Bedrock  → AWS Profile / 环境凭证
+	 *  - Google       → ADC 文件
+	 *  - 本地模型服务 → 可能不需要真实密钥
+	 *  即使本地服务不需要 Key，仍然会通过 apiKey 类型的认证接口提供 resolve()，用来报告 Provider 当前是否可用
+	 *  因此 auth 不只是“返回密码”，也承担了：检查这个 Provider 是否已经正确配置
 	 */
 	readonly auth: ProviderAuth;
 
@@ -125,7 +125,7 @@ export interface Provider<TApi extends Api = Api> {
 	// stream()
 	// → ApiStreamOptions<T>
 	// → 根据具体 API 提供专用配置
-	
+
 	// streamSimple()
 	// → SimpleStreamOptions
 	// → 使用统一、跨 Provider 的简单配置

@@ -477,7 +477,7 @@ export async function loadExtensionFromFactory(
 
 /**
  * Load extensions from paths.
- * 
+ *
  * 这个函数负责从一系列路径中加载扩展。它支持缓存机制，可以根据需要选择是否使用缓存。
  * 它还支持传递自定义的事件总线（EventBus）和扩展运行时（ExtensionRuntime），以便在加载扩展时使用。
  */

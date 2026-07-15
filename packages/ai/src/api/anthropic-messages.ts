@@ -182,7 +182,6 @@ function getAnthropicCompat(
 
 // 它继承了通用的 StreamOptions，所以同时拥有 API Key、取消信号等通用选项，以及 Claude 特有的 thinking、工具选择和客户端注入选项
 export interface AnthropicOptions extends StreamOptions {
-
 	/**
 	 * 项目通过两套字段兼容不同代际的模型
 	 * 旧模型：
@@ -191,7 +190,7 @@ export interface AnthropicOptions extends StreamOptions {
 	 * - thinkingEnabled + effort
 	 */
 
-	 /** 
+	/**
 	 * 控制是否启用 Claude 的扩展思考能力
 	 * 启用 thinking；不传时，默认不会主动把 thinking 配置发给 Anthropic，除非 streamSimple() 根据统一的 reasoning 配置自动转换。
 	 * 它对两类模型有不同作用：
@@ -739,12 +738,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			// 第一部分：三选一，| 是联合类型，表示一个 Block 首先可能是三种内容之一
 			// 其中工具调用的参数在流式过程中不是一次性返回，可能逐段到达，所以需要一个临时的 partialJson 字段来暂存
 			// 第二部分：每种内容块都必须有 index，一条 assistant 消息可能同时包含多个块，之后收到增量事件时，可以通过索引找到要更新的内容块
-			type Block = (
-				| ThinkingContent
-				| TextContent
-				| (ToolCall & { partialJson: string })
-			)
-			& { index: number };
+			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
 			// 在当前流式解析阶段，请把 output.content 看作 Block[]
 			// 正式消息内容中没有流式解析需要的 2 个临时字段，但是当前函数在生成过程中会暂时加入这些字段，所以需要更适合内部处理的 Block[] 类型
 			// 当做 Block[] 类型后就可以合法访问 2 个临时字段
@@ -773,7 +767,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					calculateCost(model, output.usage);
-				} 
+				}
 				// 表示一个新内容块开始，创建各种类型的空内容块：文本、思考、工具调用等
 				else if (event.type === "content_block_start") {
 					if (event.content_block.type === "text") {
@@ -818,7 +812,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						output.content.push(block);
 						stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 					}
-				} 
+				}
 				// 这是实际拼接内容的地方
 				else if (event.type === "content_block_delta") {
 					if (event.delta.type === "text_delta") {
@@ -866,7 +860,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							block.thinkingSignature += event.delta.signature;
 						}
 					}
-				} 
+				}
 				// 表示某一个内容块已经完成
 				else if (event.type === "content_block_stop") {
 					const index = blocks.findIndex((b) => b.index === event.index);
@@ -900,7 +894,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							});
 						}
 					}
-				} 
+				}
 				// 这个事件主要更新整条消息的最终状态
 				else if (event.type === "message_delta") {
 					// 停止原因

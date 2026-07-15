@@ -789,13 +789,27 @@ export class DefaultPackageManager implements PackageManager {
 	setProgressCallback(callback: ProgressCallback | undefined): void {
 		this.progressCallback = callback;
 	}
-
+	/* 
+	负责将 Package 添加到配置中，返回值表示：
+	true  → settings 发生了修改
+	false → 原配置已经完全相同，无需修改
+	*/
 	addSourceToSettings(source: string, options?: { local?: boolean }): boolean {
 		const scope: SourceScope = options?.local ? "project" : "user";
 		const currentSettings =
 			scope === "project" ? this.settingsManager.getProjectSettings() : this.settingsManager.getGlobalSettings();
 		const currentPackages = currentSettings.packages ?? [];
 		const normalizedSource = this.normalizePackageSourceForSettings(source, scope);
+		/* 
+		查找是否已经存在
+		这里不是简单比较字符串：existing === source
+		而是比较 Package 身份。
+		例如下面两个来源都代表同一个 npm Package：
+		- npm:pi-subagents
+		- npm:pi-subagents@0.34.0
+		它们的匹配 key 都基于包名：npm:pi-subagents
+		所以安装指定版本时，会更新已有配置，而不是追加重复项。 
+		*/
 		const matchIndex = currentPackages.findIndex((existing) => this.packageSourcesMatch(existing, source, scope));
 		if (matchIndex !== -1) {
 			const existing = currentPackages[matchIndex];
@@ -973,17 +987,30 @@ export class DefaultPackageManager implements PackageManager {
 
 	// 负责实际安装或验证 Package
 	async install(source: string, options?: { local?: boolean }): Promise<void> {
-		// 例如 parseSource("npm:pi-subagents")解析得到：
-		// {
-		// 	type: "npm",
-		// 	spec: "pi-subagents",
-		// 	name: "pi-subagents",
-		// 	version: undefined
-		// }
+		/* 
+		例如 parseSource("npm:pi-subagents")解析得到：
+		{
+			type: "npm",
+			spec: "pi-subagents",
+			name: "pi-subagents",
+			version: undefined
+		}
+		而：
+		parseSource("./my-extension")
+		得到：
+		{
+			type: "local",
+			path: "./my-extension"
+		} 
+		*/
 		const parsed = this.parseSource(source);
+		// 确定作用域
 		const scope: SourceScope = options?.local ? "project" : "user";
+		// 检查项目信任状态，用户级安装不会触发这项检查，项目级安装会检查
 		this.assertProjectTrustedForScope(scope);
+		// 包装进度事件
 		await this.withProgress("install", source, `Installing ${source}...`, async () => {
+			// 根据 Package 类型安装
 			if (parsed.type === "npm") {
 				await this.installNpm(parsed, scope, false);
 				return;

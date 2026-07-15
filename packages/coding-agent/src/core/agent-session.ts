@@ -1,6 +1,6 @@
 /**
  * AgentSession - 核心抽象，用于管理 Agent 的生命周期和 session。
- * 
+ *
  * 这个类在所有运行模式（交互式、打印、RPC）中共享。
  * 它封装了：
  * - Agent 状态访问
@@ -9,7 +9,7 @@
  * - 压缩（手动和自动）
  * - Bash 命令执行
  * - Session 切换和分支
- * 
+ *
  * 模式使用这个类并添加自己的 I/O 层。
  */
 
@@ -208,12 +208,12 @@ export interface PromptOptions {
 	/** 流式处理时，如何排队消息："steer"（中断）或 "followUp"（等待）。流式处理时必须指定。 */
 	streamingBehavior?: "steer" | "followUp";
 
-	/** 
+	/**
 	 * 这条输入从哪来（默认 "interactive"）
 	 * - "interactive" → 用户 TUI 输入的
 	 * - "rpc" → RPC 调用
 	 * - "extension" → 扩展输入
-	*/
+	 */
 	source?: InputSource;
 
 	// prompt() 还没跑完整轮 agent，就先告诉调用方「这条输入接没接住」
@@ -529,16 +529,16 @@ export class AgentSession {
 	// 为了进行自动上下文压缩检查，而追踪最近的一条助手消息
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
-	/** 
+	/**
 	 * AgentSession 订阅底层 AgentEvent 后的统一处理入口，_handleAgentEvent 是底层 Agent 与上层应用之间的桥梁
 	 * 它把 Agent 事件转发给扩展和 UI，同时负责排队状态、对话持久化、自动压缩依据和重试状态管理
-	 * 
+	 *
 	 * 它主要完成四件事：
 	 * 1. 更新 steering/follow-up 的 UI 队列
 	 * 2. 把事件发送给扩展
 	 * 3. 把事件转发给 AgentSession 的监听器
 	 * 4. 把完成的消息保存到 SessionManager
-	*/
+	 */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
 		// 处理用户排队消息，这表示 Agent 正式开始处理一条用户消息
 		// 用户消息可能来自当前正常输入、steering 队列或 follow-up 队列，若来自队列则应从 UI 的“待处理消息”中移除
@@ -571,7 +571,7 @@ export class AgentSession {
 		// 并使用 await 确保扩展处理完成后再继续向其他监听器转发，如果扩展处理很慢，也会延迟后续步骤和底层 Agent 运行
 		await this._emitExtensionEvent(event);
 
-		// 通知 AgentSession 监听器，this._emit() 与底层 Agent 的 emit 不是同一个东西。这里是把事件继续转发给订阅 
+		// 通知 AgentSession 监听器，this._emit() 与底层 Agent 的 emit 不是同一个东西。这里是把事件继续转发给订阅
 		// AgentSession 的 UI、RPC 等模块。普通事件原样转发，Agent_end 事件则添加 willRetry 标志，用于决定是否重试
 		// 这是为了告诉 UI：Agent 本轮虽然结束了，但 AgentSession 是否准备，自动重试，因此 UI 收到 agent_end 后不一
 		// 定马上显示“任务彻底结束”，还可以根据 willRetry 显示重试状态。
@@ -589,8 +589,8 @@ export class AgentSession {
 					event.message.display,
 					event.message.details,
 				);
-			} 
-			// 保存标准 LLM 消息，标准对话消息通过 appendMessage() 写入 Session JSONL，流程为 message_end → AgentSession 
+			}
+			// 保存标准 LLM 消息，标准对话消息通过 appendMessage() 写入 Session JSONL，流程为 message_end → AgentSession
 			// 收到完整消息 → SessionManager.appendMessage() → 保存到当前 Session 分支
 			else if (
 				event.message.role === "user" ||
@@ -614,7 +614,7 @@ export class AgentSession {
 					this._overflowRecoveryAttempted = false;
 				}
 
-				// 成功后结束重试状态，条件表示当前 assistant 响应成功且之前确实执行过自动重试，此时发出事件通知 UI 或 RPC 
+				// 成功后结束重试状态，条件表示当前 assistant 响应成功且之前确实执行过自动重试，此时发出事件通知 UI 或 RPC
 				// 自动重试成功结束，并立即清零重试计数（注释强调“立即”清零，是因为一次 Agent 运行中可能有多轮 LLM 调用：
 				// LLM 调用 → toolCall → 工具执行 → LLM 再次调用 → 最终回答。只要某次重试后的 assistant 响应成功，就应
 				// 结束这次错误重试状态，不能让计数继续积累到后续模型调用）。
@@ -1127,7 +1127,6 @@ export class AgentSession {
 		let messages: AgentMessage[] | undefined;
 
 		try {
-
 			// 阶段一：快速通道 —— 处理“/”开头的扩展命令
 			// 作用：如果用户输入以 / 开头（比如 /help、/login），先尝试作为扩展命令直接执行。
 			// 特点：这些命令由扩展自己管理AI交互（通过 pi.sendMessage()），不经过主代理流程。执行后直接返回，不继续往下走。
@@ -1140,7 +1139,7 @@ export class AgentSession {
 					return;
 				}
 			}
-			
+
 			// 阶段二：扩展拦截 —— 在模板展开前“偷看”并修改输入
 			// 作用：在展开 skill 或 template 之前，让所有监听 input 事件的扩展有机会：
 			// - handled：直接处理掉这个输入（比如“帮我保存一下这段对话”），不再继续。
@@ -1150,7 +1149,6 @@ export class AgentSession {
 			let currentImages = options?.images;
 			// 如果有输入事件（input event handler）钩子，先发 InputEvent 让扩展有机会拦截或改写原始输入
 			if (this._extensionRunner.hasHandlers("input")) {
-
 				const inputResult = await this._extensionRunner.emitInput(
 					currentText,
 					currentImages,
@@ -1482,7 +1480,7 @@ export class AgentSession {
 	// - 系统当前是否在流式输出中（isStreaming）？
 	// - 调用者是否要求触发新一轮AI交互（triggerTurn）？
 	// - 调用者指定了哪种送达方式（deliverAs）？
-	
+
 	// 调用 sendCustomMessage()
 	// |
 	// ├─ ① 指定了 deliverAs: "nextTurn" 吗？

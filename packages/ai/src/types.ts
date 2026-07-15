@@ -156,7 +156,7 @@ export interface StreamOptions {
 	 * they are covered by SigV4 signing; reserved headers (`x-amz-*`,
 	 * `authorization`, `host`) are silently ignored to preserve SigV4 / bearer auth.
 	 * A null value suppresses a provider/API default header with the same name.
-	 * 
+	 *
 	 * 自定义 HTTP 请求头。用于添加或覆盖请求头。一个关键设计是：null 值可以抑制提供商默认会发送的同名头。
 	 * 在 AWS Bedrock 等场景下，特定头（如 x-amz-*）会被忽略以保证签名安全。
 	 */
@@ -189,7 +189,7 @@ export interface StreamOptions {
 	 * with an error containing the requested delay, allowing higher-level retry logic
 	 * to handle it with user visibility.
 	 * Default: 60000 (60 seconds). Set to 0 to disable the cap.
-	 * 
+	 *
 	 * 最大重试延迟（毫秒）。当服务器要求客户端等待特定时间后重试时，此参数设置一个上限。
 	 * 如果服务器要求的等待时间超过此值，请求会立即失败并返回错误，将控制权交还给上层逻辑
 	 * （比如让用户决定是否继续等待）。默认 60 秒，可设为 0 禁用此限制。

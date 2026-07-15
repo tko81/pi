@@ -749,7 +749,7 @@ export async function main(args: string[], options?: MainOptions) {
 		// startupSettingsManager
 		// → 基于启动终端 cwd
 		// → 主要帮助查找会话
-		
+
 		// runtimeSettingsManager
 		// → 基于会话真实的 session cwd
 		// → 真正加载项目设置并运行 Agent
@@ -817,7 +817,7 @@ export async function main(args: string[], options?: MainOptions) {
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =
 			modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
-		
+
 		// 构建会话选项
 		// 综合 CLI 参数、模型范围、当前会话是否已有消息、模型注册表和用户设置
 		// 生成当前模型、thinking level、工具配置、排除工具和自定义工具。

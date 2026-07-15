@@ -59,7 +59,7 @@ export interface CreateAgentSessionServicesOptions {
  * 调用时机：createAgentSessionServices() 跑完之后再用，不能跳过 services 直接调这个。
  * 传进来之前，所有绑 cwd 的选项要对着 services 算好：模型、工具、thinking 等。
  * 这些在 CLI 里就是 buildSessionOptions() 干的事。
- * 
+ *
  * 厨房（services）装好了、菜也点好了（model/tools 定下来了）
  * 这个类型就是「下单开火」的传参——把厨房 + 菜单交给 createAgentSession() 真正做出 AgentSession。
  */
@@ -144,7 +144,7 @@ function applyExtensionFlagValues(
 
 /**
  * 装「厨房」：绑在某个 cwd 上的基础设施包，不创建 AgentSession，不能 prompt()
- * 
+ *
  * 做的事：
  * 建 AuthStorage（auth.json）
  * 建 SettingsManager（读全局 + 项目 settings.json）
@@ -152,7 +152,7 @@ function applyExtensionFlagValues(
  * 建 DefaultResourceLoader 并 reload()（按 settings 发现 extensions/skills/prompts/themes）
  * 注册扩展里的自定义 provider、处理 --extension-flag
  * 返回 AgentSessionServices + diagnostics
- * 
+ *
  * 何时重建： cwd 变了（/new、换项目）→ services 整套重做，保证扩展/设置/模型注册表和当前目录一致。
  */
 export async function createAgentSessionServices(
@@ -206,7 +206,7 @@ export async function createAgentSessionServices(
  * ① createAgentSessionServices(cwd)   → 备好环境
  * ② 对着 services 解析 model/tools   → buildSessionOptions 等
  * ③ createAgentSessionFromServices()    → 再建 AgentSession
- * 
+ *
  * services 绑 cwd。换项目目录 → settings、扩展、skills 路径都变。必须先按这个 cwd 建好 services，再在里面查：
  * settingsManager.getDefaultModel()
  * modelRegistry.find(...)

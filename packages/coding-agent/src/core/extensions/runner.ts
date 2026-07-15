@@ -1025,13 +1025,13 @@ export class ExtensionRunner {
 	// 	- images: 用户附带的图片
 	// 	- systemPrompt: 当前系统提示
 	// 	- systemPromptOptions: 构建系统提示的选项
-	
+
 	//  过程：
 	// 	① 初始化上下文（ctx）和结果收集器
 	// 	② 遍历所有扩展，执行其 "before_agent_start" 处理器
 	// 	③ 收集处理器返回的消息和系统提示修改
 	// 	④ 返回汇总结果
-	
+
 	//  返回值：
 	// 	- { messages?: CustomMessage[], systemPrompt?: string } 如果有任何修改
 	// 	- undefined 如果没有任何修改
@@ -1057,7 +1057,7 @@ export class ExtensionRunner {
 			this.assertActive();
 			return currentSystemPrompt;
 		};
-		
+
 		// 一个数组，存放所有扩展注入的“额外消息”（比如通知、日志、上下文信息）
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
 		// 一个旗帜变量，标记“是否有人修改过系统提示”。如果没有任何扩展修改，最终返回时就不需要携带新的 systemPrompt

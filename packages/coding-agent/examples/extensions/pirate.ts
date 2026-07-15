@@ -1,11 +1,11 @@
 /**
  * Pirate Extension
- * 
+ *
  * 这个扩展给AI加了一个“海盗模式”开关。开启后，AI会像海盗一样说话
  * 这是一个标准的 Extension（扩展）文件，它向PI（AI代理系统）注册了：
  * - 一个命令（/pirate）：用于切换海盗模式的开启/关闭。
  * - 一个事件处理器（before_agent_start）：在AI每次处理用户输入前检查模式状态，如果开启则修改系统提示。
- * 
+ *
  * Demonstrates modifying the system prompt in before_agent_start to dynamically
  * change agent behavior based on extension state.
  *

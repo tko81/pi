@@ -252,7 +252,7 @@ async function runLoop(
 					newMessages.push(result);
 				}
 			}
-			
+
 			// 发出当前轮次结束事件，assistant 消息是 message。如果没有工具调用，toolResults 就是空数组
 			await emit({ type: "turn_end", message, toolResults });
 
@@ -442,7 +442,7 @@ async function streamAssistantResponse(
 					});
 				}
 				break;
-			
+
 			// done 或 error：流结束
 			case "done":
 			case "error": {

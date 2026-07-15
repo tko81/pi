@@ -1,4 +1,4 @@
-#!/usr/bin/env node 
+#!/usr/bin/env node
 /**
  * 当这个文件被直接执行时，使用 node 来运行它
  * 当你全局安装这个包：npm install -g @earendil-works/pi-coding-agent

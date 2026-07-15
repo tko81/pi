@@ -828,7 +828,7 @@ export class SessionManager {
 	private byId: Map<string, SessionEntry> = new Map();
 	/** 按 id 索引的标签 */
 	private labelsById: Map<string, string> = new Map();
-	/** 按 id 索引的标签时间戳 */	
+	/** 按 id 索引的标签时间戳 */
 	private labelTimestampsById: Map<string, string> = new Map();
 	/** 当前叶子 id */
 	private leafId: string | null = null;

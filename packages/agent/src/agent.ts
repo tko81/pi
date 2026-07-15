@@ -75,7 +75,6 @@ function createMutableAgentState(
 	// Partial<...>	把括号内的类型所有属性变成可选
 	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>,
 ): MutableAgentState {
-
 	let tools = initialState?.tools?.slice() ?? [];
 	let messages = initialState?.messages?.slice() ?? [];
 
@@ -204,10 +203,10 @@ type ActiveRun = {
 
 /**
  * Stateful wrapper around the low-level agent loop.
- * 
+ *
  * `Agent` owns the current transcript, emits lifecycle events, executes tools,
  * and exposes queueing APIs for steering and follow-up messages.
- * 
+ *
  * 底层 Agent 循环的有状态包装器
  * Agent 拥有当前的对话记录（transcript），发出生命周期事件，执行工具
  * 并暴露用于 steering 和 follow-up 消息的队列化 API

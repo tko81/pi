@@ -1,7 +1,6 @@
 import { IMAGE_MODELS } from "./image-models.generated.ts";
 import type { ImagesApi, ImagesModel, KnownImagesProvider } from "./types.ts";
 
-
 // 自动生成的 IMAGE_MODELS
 //           ↓
 // 转换成 Map 注册表

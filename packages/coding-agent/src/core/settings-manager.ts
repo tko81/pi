@@ -26,7 +26,7 @@ export interface CompactionSettings {
 	// 预留给本轮对话的 token 空间（用户输入 + 模型回复）
 	// 触发条件：当前上下文 token 数 > contextWindow - reserveTokens
 	// 默认留 16384，避免把上下文塞满导致模型没地方输出
-	reserveTokens?: number; 
+	reserveTokens?: number;
 
 	// 压缩时保留多少最近消息的 token 不被压缩，默认 20000，既控总长，又保证近期对话细节还在
 	keepRecentTokens?: number;
@@ -35,37 +35,37 @@ export interface CompactionSettings {
 /**
  * 用 /tree 从当前分支跳到另一条线时，刚离开的那条分支可以先摘要再切，避免丢掉重要上下文
  * 树怎么工作
- * 
+ *
  * ├─ user: "重构 auth"
  * │  └─ assistant: "方案 A..."
  * │     ├─ user: "试 A"          ← 分支 1（你刚离开）
  * │     │  └─ assistant: "..."
  * │     └─ user: "改试 B"        ← 分支 2（当前 active）
  * │        └─ assistant: "..."
- * 
+ *
  * 整棵树都在一个 .jsonl 里（所有分支都存着）
  * 活跃上下文 = 从 root 沿 parentId 走到当前 leaf 的消息链
  * 模型只看这条链，别的分支消息不进 prompt
- * 
+ *
  * /tree 切分支 = 把 leaf 挪到树上另一个点，活跃路径换掉，之前那条线的原文不再发给模型。
- * 
+ *
  * 为什么要摘要
  * 切走时，刚离开的分支可能很长（多轮 tool call、关键结论）。
  * leaf 一挪，那些消息还在文件里，但不再出现在上下文里——模型等于「忘了」你刚在那条线里干了什么。
  * 分支摘要的作用：把即将离开的那条分支压成一段 summary，挂到新位置。
  * 新路径上模型仍能看到「之前另一条线大概做了什么」，又不用把整段历史塞回 context。
  * 文档原话：preserve context from the path you left without replaying the whole branch。
- * 
+ *
  * 弹窗问「Summarize branch?」可以选不摘要——接受切换后丢失那条线的细节。branchSummary.skipPrompt: true 则默认不摘要、直接切。
- * 
+ *
  * 一句话：分支共用一个 session 文件，但不同时进模型上下文；切分支会换掉活跃路径，摘要用来把旧路径的精华带到新路径上。
  */
 export interface BranchSummarySettings {
 	// 预留给分支摘要的 token 空间（用户输入 + 模型回复）,与上面类似，默认 16384
-	reserveTokens?: number; 
+	reserveTokens?: number;
 
 	// 切分支时，弹窗是否跳过 "Summarize branch?" 提示，默认 false，true 则不提示，直接摘要
-	skipPrompt?: boolean; 
+	skipPrompt?: boolean;
 }
 
 /**
@@ -144,7 +144,6 @@ export interface MarkdownSettings {
  */
 export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // 是否显示 Anthropic 额外用量相关警告，默认 true
-
 }
 
 /**
@@ -207,7 +206,7 @@ export interface Settings {
 	hideThinkingBlock?: boolean;
 	// Ctrl+G 外部编辑器 = 在 Pi 终端输入框里按 Ctrl+G，把当前正在写的消息丢给你熟悉的桌面编辑器（VS Code、vim、nano 等）去改，改完回到 Pi 继续发。
 	// Pi 自带终端内联编辑器，写短句够用；写长 prompt、多行说明、贴大段文字时别扭。Ctrl+G → 临时文件 → 启动外部编辑器 → 保存退出 → 内容回到 Pi 输入框。
-	externalEditor?: string; 
+	externalEditor?: string;
 	// 自定义 shell = 手动指定 Pi 跑 bash 工具时用哪个 shell 可执行文件（zsh/bash...）
 	// Pi agent 会替模型执行 shell 命令，不是直接用你当前终端那个 shell，而是 Pi 自己 spawn 一个子进程来跑
 	shellPath?: string;
@@ -266,7 +265,7 @@ export interface Settings {
 	// 设了 → Ctrl+P / 模型轮换，只在这批模型里切
 	// 注意： 这是轮换范围，不是「禁止用别的模型」——你仍可在 /model 里手动选列表外的模型
 	enabledModels?: string[];
-	
+
 	// 输入框为空时，500ms 内连按两次 Esc 触发的动作（默认 "tree"）
 	// "tree" 打开 /tree 会话树选择器（同一会话内切分支）
 	// "fork" 打开 fork 选择器（从历史 user 消息 fork 到新会话文件）
@@ -317,7 +316,7 @@ export interface Settings {
 	// 两处用法：
 	// 全局 HTTP 客户端（undici）：headersTimeout + bodyTimeout
 	// 调模型 API：作为 streamSimple 的 timeoutMs，覆盖 OpenAI、Codex、llama.cpp 等 provider 的单次请求超时；Codex WebSocket 空闲等待也用它
-	
+
 	// /settings 里可选 30s / 1min / 2min / 5min / disabled。
 	// 注意： 这是空闲超时，不是「整次对话总时长」。模型慢慢吐 token 时连接有数据，一般不会因这个断；卡住没响应才会超时。
 	httpIdleTimeoutMs?: number;
@@ -547,15 +546,15 @@ export class SettingsManager {
 		return SettingsManager.fromStorage(storage, options);
 	}
 
-	/** 
-	 * 这个方法不依赖磁盘，接受任意实现了 SettingsStorage 的后端 
+	/**
+	 * 这个方法不依赖磁盘，接受任意实现了 SettingsStorage 的后端
 	 * 例如可以传入：
 	 * - 文件存储
 	 * - 内存存储
 	 * - 测试用假存储
 	 * - 数据库存储
 	 * 这是一种依赖注入设计
-	*/
+	 */
 	static fromStorage(storage: SettingsStorage, options: SettingsManagerCreateOptions = {}): SettingsManager {
 		// 判断项目是否可信
 		const projectTrusted = options.projectTrusted ?? true;
